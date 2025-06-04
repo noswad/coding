@@ -1,0 +1,89 @@
+//@version=5
+strategy("大道至簡順勢操作 v2", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, slippage=1, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ====== 參數設定 ======
+// --- 趨勢參數 ---
+sma_fast_len = input.int(50, "SMA50 週期")
+sma_slow_len = input.int(200, "SMA200 週期")
+high_lookback = input.int(20, "收盤新高回看期數")
+vol_ma_len = input.int(20, "成交量均線期數")
+ema_exit_len = input.int(10, "EMA10 週期")
+
+// --- 風控參數 ---
+profit_pct = input.float(9.0, "停利百分比") / 100
+loss_pct = input.float(3.0, "停損百分比") / 100
+min_trend_pct = input.float(5.0, "最小趨勢強度(%)", minval=1.0) / 100
+
+// --- 交易頻率控制 ---
+min_bars_between_trades = input.int(10, "最小交易間隔(K線數)", minval=5)
+var int bars_since_last_trade = 0
+bars_since_last_trade := strategy.position_size == 0 ? bars_since_last_trade + 1 : 0
+
+// ====== 技術指標計算 ======
+sma_fast = ta.sma(close, sma_fast_len)
+sma_slow = ta.sma(close, sma_slow_len)
+ema_exit = ta.ema(close, ema_exit_len)
+vol_ma = ta.sma(volume, vol_ma_len)
+highest_close = ta.highest(close, high_lookback)[1]
+
+// ====== 趨勢分析 ======
+trend_strength = (sma_fast - sma_slow) / sma_slow * 100  // 轉為百分比
+bull_trend = sma_fast > sma_slow and trend_strength > min_trend_pct * 100
+higher_high = ta.highest(high, 5) > ta.highest(high, 5)[5]
+higher_low = ta.lowest(low, 5) > ta.lowest(low, 5)[5]
+price_breakout = close > highest_close
+vol_confirm = volume > vol_ma * 1.2
+
+// ====== 交易信號生成 ======
+can_trade = bars_since_last_trade >= min_bars_between_trades
+entry_signal = bull_trend and price_breakout and vol_confirm and higher_high and higher_low and can_trade
+
+// ====== 部位管理 ======
+var float entry_price = na
+var float stop_loss_price = na
+var float take_profit_price = na
+var float trail_price = na
+
+// --- 進場執行 ---
+if entry_signal and strategy.position_size == 0
+    entry_price := close
+    stop_loss_price := entry_price * (1 - loss_pct)
+    take_profit_price := entry_price * (1 + profit_pct)
+    trail_price := high
+    strategy.entry("多頭突破", strategy.long, comment="新高突破進場")
+    label_text = str.tostring(close, format.price) + "\n趨勢強度: " + str.tostring(trend_strength, "#.##") + "%"
+    label.new(bar_index, low, label_text, color=color.green, style=label.style_label_up, textcolor=color.white)
+
+// --- 動態止損更新 ---
+if strategy.position_size > 0
+    trail_price := math.max(trail_price, high)
+    new_stop = trail_price * (1 - loss_pct)
+    stop_loss_price := math.max(stop_loss_price, new_stop)
+
+// --- 出場條件 ---
+exit_signal = strategy.position_size > 0 and (close <= stop_loss_price or close >= take_profit_price or close < ema_exit or (close < sma_fast and volume > vol_ma))
+
+if exit_signal
+    strategy.close("多頭突破", comment="嚴格風控出場")
+    exit_text = str.tostring(close, format.price) + "\n獲利: " + str.tostring((close/entry_price - 1) * 100, "#.##") + "%"
+    label.new(bar_index, high, exit_text, color=color.red, style=label.style_label_down, textcolor=color.white)
+
+// ====== 畫圖標記 ======
+plot(sma_fast, "SMA50", color=color.blue, linewidth=2)
+plot(sma_slow, "SMA200", color=color.orange, linewidth=2)
+plot(ema_exit, "EMA10", color=color.purple, linewidth=1)
+plot(strategy.position_size > 0 ? stop_loss_price : na, "追蹤止損", color=color.red, style=plot.style_circles)
+
+// 進出場箭頭
+plotshape(entry_signal and strategy.position_size == 0, "做多信號", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(exit_signal and strategy.position_size > 0, "平倉信號", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// 狀態面板
+var table stats = table.new(position.top_right, 5, 3, color.black, color.white, 1, color.gray, 1)
+if barstate.islast
+    table.cell(stats, 0, 0, "趨勢強度", text_color=color.white)
+    table.cell(stats, 1, 0, str.tostring(trend_strength, "#.##") + "%", text_color=trend_strength >= min_trend_pct * 100 ? color.green : color.red)
+    table.cell(stats, 0, 1, "量能狀態", text_color=color.white)
+    table.cell(stats, 1, 1, vol_confirm ? "放量" : "縮量", text_color=vol_confirm ? color.green : color.red)
+    table.cell(stats, 0, 2, "可交易", text_color=color.white)
+    table.cell(stats, 1, 2, can_trade ? "是" : "否", text_color=can_trade ? color.green : color.red)

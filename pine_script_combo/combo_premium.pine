@@ -1,0 +1,857 @@
+//@version=5
+
+// Inputs needed for strategy() declaration (must be defined before strategy() call)
+group_advanced_strategy_setup = "進階設定 (策略層級) (Advanced Settings - Strategy Level)"
+use_pyramiding_input_strat = input.bool(false, "啟用金字塔加碼 (Enable Pyramiding)", group = group_advanced_strategy_setup, inline="adv1_s")
+max_pyramiding_levels_input_strat = input.int(3, "最大加碼次數 (Max Pyramiding Levels)", minval=1, maxval=10, group = group_advanced_strategy_setup, inline="adv1_s")
+
+strategy("綜合指標策略Premium (Indicator Combo Strategy Premium)",
+     shorttitle="綜合策略Premium",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, // Default to 10% of equity per trade. Dynamic sizing can override.
+     pyramiding = 10, // Allow up to 10 entries; script logic with max_pyramiding_levels refines this. Maxval of input is 10.
+     commission_type=strategy.commission.percent,
+     commission_value=0.1)
+
+// ————— Strategy Presets —————
+group_presets = "策略預設 (Strategy Presets)"
+strategy_preset = input.string("平衡型 (Balanced)", "策略預設 (Strategy Preset)", options=["自訂 (Custom)", "保守型 (Conservative)", "平衡型 (Balanced)", "激進型 (Aggressive)"], group = group_presets, tooltip="選擇預設參數組合，或選擇'自訂'以手動調整所有參數。\nSelect a preset parameter combination, or choose 'Custom' to manually adjust all parameters.")
+
+// ————— General Settings —————
+group_general = "一般設定 (General Settings)"
+src = input.source(close, "來源 (Source)", group = group_general)
+
+// ————— Indicator Definitions —————
+// Bollinger Bands (BB)
+group_bb = "布林通道 (Bollinger Bands)"
+show_bb_plot = input.bool(true, "繪製布林通道 (Plot Bollinger Bands)", group = group_bb, inline="bb1")
+bb_len = input.int(20, "長度 (Length)", minval=1, group = group_bb, inline="bb2") // Not modified by presets
+bb_mult_input = input.float(2.0, "標準差倍數 (StdDev Multiplier)", minval=0.001, maxval=50, group = group_bb, inline="bb2")
+
+// Moving Average (MA)
+group_ma = "移動平均線 (Moving Average)"
+show_ma_plot = input.bool(true, "繪製移動平均線 (Plot MA)", group = group_ma, inline="ma1")
+ma_type_input = input.string("SMA", "類型 (Type)", options=["SMA", "EMA", "WMA", "RMA", "VWMA"], group = group_ma, inline="ma2")
+ma_len_input = input.int(50, "長度 (Length)", minval=1, group = group_ma, inline="ma2")
+
+// Directional Movement Index (DMI)
+group_dmi = "DMI (Directional Movement Index)"
+dmi_len_input = input.int(14, "DI 長度 (DI Length)", minval=1, group = group_dmi, inline="dmi2")
+adx_smooth_input = input.int(14, "ADX 平滑長度 (ADX Smoothing)", minval=1, group = group_dmi, inline="dmi2")
+
+// Stochastic (KD)
+group_kd = "KD (Stochastic)"
+kd_k_period_input = input.int(14, "%K 週期 (K Period)", minval=1, group = group_kd, inline="kd2")
+kd_k_smooth_input = input.int(3, "%K 平滑 (K Smoothing)", minval=1, group = group_kd, inline="kd3")
+kd_d_period_input = input.int(3, "%D 平滑 (D Smoothing)", minval=1, group = group_kd, inline="kd3")
+
+// Relative Strength Index (RSI)
+group_rsi = "RSI (Relative Strength Index)"
+rsi_len_input = input.int(14, "長度 (Length)", minval=1, group = group_rsi, inline="rsi2")
+
+// MACD (Moving Average Convergence Divergence)
+group_macd = "MACD"
+macd_fast_len_input = input.int(12, "快速EMA長度 (Fast Length)", minval=1, group = group_macd, inline="macd2")
+macd_slow_len_input = input.int(26, "慢速EMA長度 (Slow Length)", minval=1, group = group_macd, inline="macd2")
+macd_signal_len_input = input.int(9, "訊號線EMA長度 (Signal Length)", minval=1, group = group_macd, inline="macd3")
+
+// ————— Multi-Timeframe (MTF) Settings —————
+group_mtf = "跨時間框架設定 (MTF Settings)"
+use_mtf_ma_filter_input = input.bool(false, "啟用更高時間框架 MA 過濾 (Enable Higher TF MA Filter)", group = group_mtf, inline="mtf1")
+mtf_ma_timeframe_input = input.string("D", "MTF MA 時間框架 (MTF MA Timeframe)", options=["15", "30", "45", "60", "120", "180", "240", "D", "W", "M"], group = group_mtf, inline="mtf1_tf", tooltip="使用與主圖表MA相同的長度和類型。Uses same length/type as main chart MA.")
+show_mtf_ma_plot_input = input.bool(true, "繪製MTF MA (Plot MTF MA)", group = group_mtf, inline="mtf1_plot")
+use_mtf_ma_in_ml_score_input = input.bool(false, "MTF MA 納入ML評分 (MTF MA in ML Score)", group = group_mtf, inline="mtf1_ml")
+
+// ————— Market Sentiment Settings —————
+group_sentiment = "市場情緒設定 (Market Sentiment Settings)"
+use_vix_filter_input = input.bool(false, "啟用VIX市場情緒過濾 (Enable VIX Market Sentiment Filter)", group = group_sentiment, inline="vix1")
+vix_ticker_input = input.string("TVC:VIX", "VIX 商品代碼 (VIX Ticker)", group = group_sentiment, inline="vix1_ticker")
+vix_threshold_input = input.float(20.0, "VIX 閾值 (VIX Threshold)", minval=0, group = group_sentiment, inline="vix2")
+vix_trade_when_calm_input = input.bool(true, "VIX 低於閾值時交易 (Trade when VIX < Threshold)", group = group_sentiment, inline="vix2_cond", tooltip="若勾選，VIX低於閾值時允許交易。若不勾選，VIX高於閾值時允許交易。\nIf checked, trades allowed when VIX < threshold. If unchecked, trades allowed when VIX > threshold.")
+use_vix_in_ml_score_input = input.bool(false, "VIX 納入ML評分 (VIX in ML Score)", group = group_sentiment, inline="vix1_ml")
+
+// ————— Fibonacci Settings —————
+group_fib = "斐波那契設定 (Fibonacci Settings)"
+show_fib_levels_input = input.bool(false, "繪製斐波那契水平 (Plot Fibonacci Levels)", group = group_fib, inline="fib1")
+use_fib_filter_input = input.bool(false, "啟用斐波那契過濾 (Enable Fibonacci Filter)", group = group_fib, inline="fib1_filter")
+fib_lookback_input = input.int(50, "斐波那契回溯週期 (Fibonacci Lookback Period)", minval=5, group = group_fib, inline="fib2")
+fib_long_entry_level_input = input.float(0.618, "斐波那契多頭進場水平 (Fib Long Entry Level)", step=0.001, group = group_fib, inline="fib2_long", tooltip="價格需高於此回撤水平 (從低點算起)。Price must be above this retracement level (from low).")
+fib_short_entry_level_input = input.float(0.618, "斐波那契空頭進場水平 (Fib Short Entry Level)", step=0.001, group = group_fib, inline="fib2_short", tooltip="價格需低於此回撤水平 (從高點算起)。Price must be below this retracement level (from high).")
+
+// ————— Strategy Settings —————
+group_strategy = "策略設定 (Strategy Settings)"
+trade_direction = input.string("多空都做", "交易方向 (Trade Direction)", options=["多空都做", "只做多", "只做空"], group = group_strategy, inline="s0_dir")
+use_ma_filter_input = input.bool(true, "使用 MA 趨勢過濾 (Use MA Trend Filter)", group = group_strategy, inline="s1_ma")
+use_dmi_filter_input = input.bool(true, "使用 DMI 趨勢過濾 (Use DMI Trend Filter)", group = group_strategy, inline="s1_dmi")
+use_rsi_entry_input = input.bool(true, "使用 RSI 進場 (Use RSI Entry)", group = group_strategy, inline="s2_rsi")
+rsi_entry_ob_input = input.int(70, "RSI 進場超買水平 (RSI Entry Overbought)", group = group_strategy, minval=50, maxval=100, inline="s2_rsi_val")
+rsi_entry_os_input = input.int(30, "RSI 進場超賣水平 (RSI Entry Oversold)", group = group_strategy, minval=0, maxval=50, inline="s2_rsi_val")
+use_kd_entry_input = input.bool(false, "使用 KD 進場 (Use KD Entry)", group = group_strategy, inline="s3_kd")
+kd_entry_ob_input = input.int(80, "KD 進場超買水平 (KD Entry Overbought)", group = group_strategy, minval=50, maxval=100, inline="s3_kd_val")
+kd_entry_os_input = input.int(20, "KD 進場超賣水平 (KD Entry Oversold)", group = group_strategy, minval=0, maxval=50, inline="s3_kd_val")
+use_macd_entry_input = input.bool(false, "使用 MACD 進場 (Use MACD Entry)", group = group_strategy, inline="s4_macd")
+adx_min_strength_input = input.int(20, "ADX 最小趨勢強度 (ADX Min Trend Strength)", group = group_strategy, minval=0, inline="s5_adx")
+use_volume_confirmation = input.bool(false, "使用成交量確認 (Use Volume Confirmation)", group = group_strategy, inline="s6_vol")
+volume_conf_type = input.string("大於均量 (Above MA)", "成交量確認類型 (Vol Conf Type)", options=["大於均量 (Above MA)", "均量倍數 (MA Multiple)"], group=group_strategy, inline="s6_vol_type", tooltip="僅在啟用成交量確認時有效")
+volume_ma_len_input = input.int(20, "成交量均線長度 (Volume MA Length)", group = group_strategy, minval=1, tooltip = "僅在啟用成交量確認時有效", inline="s6_vol_len")
+volume_multiple_input = input.float(1.5, "成交量倍數 (Volume Multiple)", group=group_strategy, minval=1.0, step=0.1, inline="s6_vol_len", tooltip="僅在選擇 '均量倍數' 類型時有效")
+atr_period_input = input.int(14, "ATR 週期 (ATR Period)", group = group_strategy, minval=1, inline="sl_tp_atr")
+use_sl_input = input.bool(true, "使用停損 (Use Stop Loss)", group = group_strategy, inline="sl")
+sl_atr_mult_input = input.float(2.0, "停損 ATR 倍數 (SL ATR Multiplier)", group = group_strategy, minval=0.1, inline="sl")
+use_tp_input = input.bool(true, "使用停利 (Use Take Profit)", group = group_strategy, inline="tp")
+tp_atr_mult_input = input.float(3.0, "停利 ATR 倍數 (TP ATR Multiplier)", group = group_strategy, minval=0.1, inline="tp")
+testPeriodStart = input.time(timestamp("01 Jan 2020 00:00 +0000"), "開始回測時間 (Backtest Start Time)", group = group_strategy)
+testPeriodEnd = input.time(timestamp("01 Jan 2024 00:00 +0000"), "結束回測時間 (Backtest End Time)", group = group_strategy)
+
+// ————— Machine Learning Inspired Settings —————
+group_ml = "機器學習設定 (Machine Learning Settings)"
+use_ml_logic_input = input.bool(false, "啟用機器學習邏輯 (Enable ML Logic)", group = group_ml, inline="ml0")
+ml_long_entry_threshold_input = input.float(2.5, "ML 多頭進場閾值 (ML Long Score Threshold)", group = group_ml, minval=0, step=0.1, inline="ml0_long_thresh")
+ml_short_entry_threshold_input = input.float(2.5, "ML 空頭進場閾值 (ML Short Score Threshold)", group = group_ml, minval=0, step=0.1, inline="ml0_short_thresh")
+ml_weight_ma_long_input = input.float(1.0, "MA 多頭權重 (MA Long W.)", group = group_ml, minval=0, step=0.1, inline="ml1_long")
+ml_weight_dmi_long_input = input.float(1.0, "DMI 多頭權重 (DMI Long W.)", group = group_ml, minval=0, step=0.1, inline="ml1_long")
+ml_weight_rsi_long_input = input.float(1.0, "RSI 多頭權重 (RSI Long W.)", group = group_ml, minval=0, step=0.1, inline="ml2_long")
+ml_weight_kd_long_input = input.float(0.5, "KD 多頭權重 (KD Long W.)", group = group_ml, minval=0, step=0.1, inline="ml2_long")
+ml_weight_macd_long_input = input.float(0.5, "MACD 多頭權重 (MACD Long W.)", group = group_ml, minval=0, step=0.1, inline="ml3_long")
+ml_weight_ma_short_input = input.float(1.0, "MA 空頭權重 (MA Short W.)", group = group_ml, minval=0, step=0.1, inline="ml1_short")
+ml_weight_dmi_short_input = input.float(1.0, "DMI 空頭權重 (DMI Short W.)", group = group_ml, minval=0, step=0.1, inline="ml1_short")
+ml_weight_rsi_short_input = input.float(1.0, "RSI 空頭權重 (RSI Short W.)", group = group_ml, minval=0, step=0.1, inline="ml2_short")
+ml_weight_kd_short_input = input.float(0.5, "KD 空頭權重 (KD Short W.)", group = group_ml, minval=0, step=0.1, inline="ml2_short")
+ml_weight_macd_short_input = input.float(0.5, "MACD 空頭權重 (MACD Short W.)", group = group_ml, minval=0, step=0.1, inline="ml3_short")
+use_volume_in_ml_score_input = input.bool(false, "成交量納入ML評分 (Volume in ML Score)", group = group_ml, inline="ml4_vol")
+ml_weight_volume_long_input = input.float(0.5, "成交量多頭權重 (Vol Long W.)", group = group_ml, minval=0, step=0.1, inline="ml4_vol_w")
+ml_weight_volume_short_input = input.float(0.5, "成交量空頭權重 (Vol Short W.)", group = group_ml, minval=0, step=0.1, inline="ml4_vol_w")
+ml_weight_mtf_ma_long_input = input.float(1.0, "MTF MA 多頭權重 (MTF MA Long W.)", group = group_ml, minval=0, step=0.1, inline="ml5_mtf_long")
+ml_weight_mtf_ma_short_input = input.float(1.0, "MTF MA 空頭權重 (MTF MA Short W.)", group = group_ml, minval=0, step=0.1, inline="ml5_mtf_short")
+ml_weight_vix_long_input = input.float(0.5, "VIX 多頭權重 (VIX Long W.)", group = group_ml, minval=0, step=0.1, inline="ml6_vix_long")
+ml_weight_vix_short_input = input.float(0.5, "VIX 空頭權重 (VIX Short W.)", group = group_ml, minval=0, step=0.1, inline="ml6_vix_short")
+is_ml_debug_on = input.bool(false, "啟用ML調試繪圖 (Enable ML Debug Plots)", group = group_ml, inline="ml_debug_toggle")
+
+// ————— Advanced Settings —————
+group_advanced = "進階設定 (Advanced Settings)"
+use_trailing_stop_input = input.bool(false, "啟用追蹤止損 (Enable Trailing Stop)", group = group_advanced, inline="adv2")
+trailing_stop_atr_mult_input = input.float(2.5, "追蹤止損ATR倍數 (Trailing Stop ATR Mult)", minval=0.1, step=0.1, group = group_advanced, inline="adv2")
+trailing_stop_activation_atr_mult_input = input.float(1.0, "啟動追蹤止損ATR倍數 (Activation ATR Mult)", minval=0.1, step=0.1, group = group_advanced, inline="adv3")
+
+// ————— Risk Management —————
+group_risk = "風險管理 (Risk Management)"
+use_max_daily_loss_input = input.bool(false, "啟用每日最大虧損限制 (Enable Max Daily Loss)", group = group_risk, inline="risk1")
+max_daily_loss_pct_input = input.float(2.0, "每日最大虧損百分比 (Max Daily Loss %)", minval=0.1, step=0.1, group = group_risk, inline="risk1")
+use_max_drawdown_input = input.bool(false, "啟用最大回撤限制 (Enable Max Drawdown)", group = group_risk, inline="risk2")
+max_drawdown_pct_input = input.float(10.0, "最大回撤百分比 (Max Drawdown %)", minval=1.0, step=0.5, group = group_risk, inline="risk2")
+use_dynamic_pos_sizing_input = input.bool(false, "啟用ATR動態倉位大小 (Enable ATR Dynamic Position Sizing)", group = group_risk, inline="risk_dps")
+dps_risk_pct_input = input.float(1.0, "動態倉位單筆風險百分比 (% Equity Risk per Trade for DPS)", minval=0.1, maxval=10, step=0.1, group = group_risk, inline="risk_dps_val", tooltip="基於此風險百分比、ATR及下方ATR倍數計算倉位大小。")
+dps_atr_stop_mult_input = input.float(2.0, "動態倉位ATR止損倍數 (DPS ATR Stop Multiplier for Sizing)", minval=0.1, step=0.1, group = group_risk, inline="risk_dps_val", tooltip="用於計算倉位大小的ATR止損倍數。建議與策略停損ATR倍數一致。\nUsed for position sizing calc. Recommended to match SL ATR Mult.")
+
+// ————— Plotting Extras —————
+group_plotting_extras = "額外繪圖設定 (Extra Plotting Settings)"
+show_entry_sl_tp_plots = input.bool(false, "繪製進場價與預期停損/利目標 (Plot Entry & SL/TP)", group = group_plotting_extras, inline="plot_etp1")
+use_ml_warning_alerts = input.bool(false, "啟用ML進場觀察提醒 (Enable ML Pre-Entry Alerts)", group = group_plotting_extras, inline="plot_mlwarn1")
+ml_warning_threshold_pct = input.float(0.80, "ML提醒閾值百分比 (ML Alert Threshold %)", minval=0.1, maxval=0.99, step=0.05, group = group_plotting_extras, inline="plot_mlwarn2", tooltip="當ML分數達到進場閾值的此百分比時提醒 (e.g., 0.8 = 80%)")
+min_contributors_for_ml_warning = input.int(2, "ML提醒最少貢獻指標數", minval=1, maxval=7, group=group_plotting_extras, inline="plot_mlwarn2", tooltip="ML觀察提醒至少需要多少個指標貢獻分數 (包含MTF MA, VIX)")
+
+// ————— Apply Strategy Presets —————
+
+// Declare as global (not local) so they are visible everywhere
+var effective_qty_type = strategy.percent_of_equity
+var effective_qty_value = 10
+
+// Initialize effective variables with input values (default for "Custom" preset)
+bb_mult = bb_mult_input
+ma_type = ma_type_input
+ma_len = ma_len_input
+dmi_len = dmi_len_input
+adx_smooth = adx_smooth_input
+kd_k_period = kd_k_period_input
+kd_k_smooth = kd_k_smooth_input
+kd_d_period = kd_d_period_input
+rsi_len = rsi_len_input
+macd_fast_len = macd_fast_len_input
+macd_slow_len = macd_slow_len_input
+macd_signal_len = macd_signal_len_input
+
+use_ma_filter = use_ma_filter_input
+use_dmi_filter = use_dmi_filter_input
+use_rsi_entry = use_rsi_entry_input
+rsi_entry_ob = rsi_entry_ob_input
+rsi_entry_os = rsi_entry_os_input
+use_kd_entry = use_kd_entry_input
+kd_entry_ob = kd_entry_ob_input
+kd_entry_os = kd_entry_os_input
+use_macd_entry = use_macd_entry_input
+adx_min_strength = adx_min_strength_input
+
+use_sl = use_sl_input
+sl_atr_mult = sl_atr_mult_input
+use_tp = use_tp_input
+tp_atr_mult = tp_atr_mult_input
+
+use_ml_logic = use_ml_logic_input
+ml_long_entry_threshold = ml_long_entry_threshold_input
+ml_short_entry_threshold = ml_short_entry_threshold_input
+
+use_pyramiding = use_pyramiding_input_strat
+max_pyramiding_levels = max_pyramiding_levels_input_strat
+
+use_trailing_stop = use_trailing_stop_input
+trailing_stop_atr_mult = trailing_stop_atr_mult_input
+trailing_stop_activation_atr_mult = trailing_stop_activation_atr_mult_input
+
+use_max_daily_loss = use_max_daily_loss_input
+max_daily_loss_pct = max_daily_loss_pct_input
+use_max_drawdown = use_max_drawdown_input
+max_drawdown_pct = max_drawdown_pct_input
+
+// ML Weights (not affected by presets for now, user customizes)
+ml_weight_ma_long = ml_weight_ma_long_input
+ml_weight_dmi_long = ml_weight_dmi_long_input
+ml_weight_rsi_long = ml_weight_rsi_long_input
+ml_weight_kd_long = ml_weight_kd_long_input
+ml_weight_macd_long = ml_weight_macd_long_input
+ml_weight_volume_long = ml_weight_volume_long_input
+ml_weight_mtf_ma_long = ml_weight_mtf_ma_long_input
+ml_weight_vix_long = ml_weight_vix_long_input
+
+ml_weight_ma_short = ml_weight_ma_short_input
+ml_weight_dmi_short = ml_weight_dmi_short_input
+ml_weight_rsi_short = ml_weight_rsi_short_input
+ml_weight_kd_short = ml_weight_kd_short_input
+ml_weight_macd_short = ml_weight_macd_short_input
+ml_weight_volume_short = ml_weight_volume_short_input
+ml_weight_mtf_ma_short = ml_weight_mtf_ma_short_input
+ml_weight_vix_short = ml_weight_vix_short_input
+
+use_volume_in_ml_score = use_volume_in_ml_score_input
+use_mtf_ma_in_ml_score = use_mtf_ma_in_ml_score_input
+use_vix_in_ml_score = use_vix_in_ml_score_input
+
+// Other new feature inputs (not preset-driven)
+use_mtf_ma_filter = use_mtf_ma_filter_input
+mtf_ma_timeframe = mtf_ma_timeframe_input
+show_mtf_ma_plot = show_mtf_ma_plot_input
+
+use_vix_filter = use_vix_filter_input
+vix_ticker = vix_ticker_input
+vix_threshold = vix_threshold_input
+vix_trade_when_calm = vix_trade_when_calm_input
+
+show_fib_levels = show_fib_levels_input
+use_fib_filter = use_fib_filter_input
+fib_lookback = fib_lookback_input
+fib_long_entry_level = fib_long_entry_level_input
+fib_short_entry_level = fib_short_entry_level_input
+
+use_dynamic_pos_sizing = use_dynamic_pos_sizing_input
+dps_risk_pct = dps_risk_pct_input
+dps_atr_stop_mult = dps_atr_stop_mult_input
+
+atr_period = atr_period_input // Effective value (not changed by presets)
+volume_ma_len = volume_ma_len_input     // Effective value (not changed by presets)
+volume_multiple = volume_multiple_input // Effective value (not changed by presets)
+
+// Override effective variables if a specific preset is selected
+if strategy_preset != "自訂 (Custom)"
+    if strategy_preset == "保守型 (Conservative)"
+        use_ma_filter := true
+        use_dmi_filter := true
+        use_rsi_entry := true
+        use_kd_entry := true
+        use_macd_entry := false
+        rsi_entry_ob := 75
+        rsi_entry_os := 25
+        kd_entry_ob := 85
+        kd_entry_os := 15
+        adx_min_strength := 25
+        use_sl := true
+        sl_atr_mult := 1.5
+        use_tp := true
+        tp_atr_mult := 2.0
+        use_ml_logic := false // ML logic itself
+        use_pyramiding := false
+        use_trailing_stop := false
+        use_max_daily_loss := true
+        max_daily_loss_pct := 1.5
+        use_max_drawdown := true
+        max_drawdown_pct := 7.5
+        
+    else if strategy_preset == "平衡型 (Balanced)"
+        use_ma_filter := true
+        use_dmi_filter := true
+        use_rsi_entry := true
+        use_kd_entry := false
+        use_macd_entry := false
+        rsi_entry_ob := 70
+        rsi_entry_os := 30
+        kd_entry_ob := 80
+        kd_entry_os := 20
+        adx_min_strength := 20
+        use_sl := true
+        sl_atr_mult := 2.0
+        use_tp := true
+        tp_atr_mult := 3.0
+        use_ml_logic := false // ML logic itself
+        use_pyramiding := false
+        use_trailing_stop := false
+        use_max_daily_loss := false
+        use_max_drawdown := false
+        
+    else if strategy_preset == "激進型 (Aggressive)"
+        use_ma_filter := true
+        use_dmi_filter := false
+        use_rsi_entry := true
+        use_kd_entry := false
+        use_macd_entry := true
+        rsi_entry_ob := 65
+        rsi_entry_os := 35
+        kd_entry_ob := 75
+        kd_entry_os := 25
+        adx_min_strength := 15
+        use_sl := true
+        sl_atr_mult := 2.5
+        use_tp := true
+        tp_atr_mult := 4.0
+        use_ml_logic := true // ML logic itself
+        ml_long_entry_threshold := 2.0
+        ml_short_entry_threshold := 2.0
+        use_pyramiding := true
+        max_pyramiding_levels := 2
+        use_trailing_stop := true
+        trailing_stop_atr_mult := 2.0
+        trailing_stop_activation_atr_mult := 1.0
+        use_max_daily_loss := false
+        use_max_drawdown := false
+
+// ————— Indicator Calculations —————
+bb_basis = ta.sma(src, bb_len)
+bb_dev = bb_mult * ta.stdev(src, bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+f_ma(source, length, type) =>
+    float result = na
+    if type == "SMA"
+        result := ta.sma(source, length)
+    else if type == "EMA"
+        result := ta.ema(source, length)
+    else if type == "WMA"
+        result := ta.wma(source, length)
+    else if type == "RMA"
+        result := ta.rma(source, length)
+    else if type == "VWMA"
+        result := ta.vwma(source, length)
+    result
+
+ma_val = f_ma(src, ma_len, ma_type)
+[di_plus, di_minus, adx_val] = ta.dmi(dmi_len, adx_smooth)
+fast_k = ta.stoch(close, high, low, kd_k_period)
+slow_k = ta.sma(fast_k, kd_k_smooth) 
+slow_d = ta.sma(slow_k, kd_d_period) 
+rsi_val = ta.rsi(src, rsi_len)
+[macd_line, macd_signal_line, macd_hist] = ta.macd(src, macd_fast_len, macd_slow_len, macd_signal_len)
+atr_val = ta.atr(atr_period)
+
+// MTF MA Calculation
+mtf_ma_val = request.security(syminfo.tickerid, mtf_ma_timeframe, f_ma(src, ma_len, ma_type), lookahead=barmerge.lookahead_off)
+
+// VIX Calculation
+vix_val = use_vix_filter or (use_ml_logic and use_vix_in_ml_score) ? request.security(vix_ticker, timeframe.period, close, lookahead=barmerge.lookahead_off) : na
+
+// Fibonacci Calculation
+fib_high_val = ta.highest(high, fib_lookback)
+fib_low_val = ta.lowest(low, fib_lookback)
+fib_range = fib_high_val - fib_low_val
+
+fib_level_0_236_long = fib_low_val + fib_range * 0.236
+fib_level_0_382_long = fib_low_val + fib_range * 0.382
+fib_level_0_500_long = fib_low_val + fib_range * 0.500
+fib_level_0_618_long = fib_low_val + fib_range * 0.618
+fib_level_0_786_long = fib_low_val + fib_range * 0.786
+
+fib_level_0_236_short = fib_high_val - fib_range * 0.236
+fib_level_0_382_short = fib_high_val - fib_range * 0.382
+fib_level_0_500_short = fib_high_val - fib_range * 0.500
+fib_level_0_618_short = fib_high_val - fib_range * 0.618
+fib_level_0_786_short = fib_high_val - fib_range * 0.786
+
+// ————— Plotting Indicators —————
+plot(show_bb_plot ? bb_basis : na, "BB 中軌 (Basis)", color=color.new(color.blue, 0))
+plot_bb_upper = plot(show_bb_plot ? bb_upper : na, "BB 上軌 (Upper)", color=color.new(color.gray, 50))
+plot_bb_lower = plot(show_bb_plot ? bb_lower : na, "BB 下軌 (Lower)", color=color.new(color.gray, 50))
+fill(plot_bb_upper, plot_bb_lower, color=color.new(color.gray, 90), title="BB 背景填充 (Fill)", display = show_bb_plot ? display.all : display.none)
+plot(show_ma_plot ? ma_val : na, "MA", color=color.new(color.orange, 0))
+plot(show_mtf_ma_plot and use_mtf_ma_filter and not na(mtf_ma_val) ? mtf_ma_val : na, "MTF MA", color=color.new(color.purple, 0), style=plot.style_cross, linewidth=2)
+
+// Plot Fibonacci Levels
+plot(show_fib_levels and not na(fib_level_0_236_long) ? fib_level_0_236_long : na, "Fib 0.236", color=color.new(color.gray, 50), style=plot.style_line)
+plot(show_fib_levels and not na(fib_level_0_382_long) ? fib_level_0_382_long : na, "Fib 0.382", color=color.new(color.gray, 50), style=plot.style_line)
+plot(show_fib_levels and not na(fib_level_0_500_long) ? fib_level_0_500_long : na, "Fib 0.500", color=color.new(color.red, 30), style=plot.style_line)
+plot(show_fib_levels and not na(fib_level_0_618_long) ? fib_level_0_618_long : na, "Fib 0.618", color=color.new(color.gray, 50), style=plot.style_line)
+plot(show_fib_levels and not na(fib_level_0_786_long) ? fib_level_0_786_long : na, "Fib 0.786", color=color.new(color.gray, 50), style=plot.style_line)
+plot(show_fib_levels and not na(fib_high_val) ? fib_high_val : na, "Fib High", color=color.new(color.green, 30), style=plot.style_line)
+plot(show_fib_levels and not na(fib_low_val) ? fib_low_val : na, "Fib Low", color=color.new(color.green, 30), style=plot.style_line)
+
+// ————— Entry Conditions Logic —————
+f_bool_to_str(val) => val ? "T" : "F"
+timeWindow = time >= testPeriodStart and time <= testPeriodEnd or (testPeriodStart == testPeriodEnd)
+
+// --- Original Logic Components ---
+long_ma_ok = not use_ma_filter or (close > ma_val and ma_val > ma_val[1])
+long_dmi_ok = not use_dmi_filter or (adx_val > adx_min_strength and di_plus > di_minus)
+rsi_long_signal = use_rsi_entry and ta.crossover(rsi_val, rsi_entry_os) and barstate.isconfirmed
+kd_long_signal = use_kd_entry and (slow_k < kd_entry_os and ta.crossover(slow_k, slow_d)) and barstate.isconfirmed
+macd_long_signal = use_macd_entry and ta.crossover(macd_line, macd_signal_line) and barstate.isconfirmed
+long_oscillator_fired = (use_rsi_entry and rsi_long_signal) or (use_kd_entry and kd_long_signal) or (use_macd_entry and macd_long_signal)
+long_oscillator_active = use_rsi_entry or use_kd_entry or use_macd_entry
+long_oscillator_condition_met = not long_oscillator_active or long_oscillator_fired
+
+short_ma_ok = not use_ma_filter or (close < ma_val and ma_val < ma_val[1])
+short_dmi_ok = not use_dmi_filter or (adx_val > adx_min_strength and di_minus > di_plus)
+rsi_short_signal = use_rsi_entry and ta.crossunder(rsi_val, rsi_entry_ob) and barstate.isconfirmed
+kd_short_signal = use_kd_entry and (slow_k > kd_entry_ob and ta.crossunder(slow_k, slow_d)) and barstate.isconfirmed
+macd_short_signal = use_macd_entry and ta.crossunder(macd_line, macd_signal_line) and barstate.isconfirmed
+short_oscillator_fired = (use_rsi_entry and rsi_short_signal) or (use_kd_entry and kd_short_signal) or (use_macd_entry and macd_short_signal)
+short_oscillator_active = use_rsi_entry or use_kd_entry or use_macd_entry
+short_oscillator_condition_met = not short_oscillator_active or short_oscillator_fired
+
+// Volume Confirmation Logic
+avg_volume = ta.sma(volume, volume_ma_len)
+volume_condition_met = false
+if volume_conf_type == "大於均量 (Above MA)"
+    volume_condition_met := volume > avg_volume
+else if volume_conf_type == "均量倍數 (MA Multiple)"
+    volume_condition_met := volume > avg_volume * volume_multiple
+volume_confirms_trade = not use_volume_confirmation or volume_condition_met
+
+// MTF MA Filter Logic
+long_mtf_ma_filter_ok = not use_mtf_ma_filter or (not na(mtf_ma_val) and close > mtf_ma_val and mtf_ma_val > mtf_ma_val[1])
+short_mtf_ma_filter_ok = not use_mtf_ma_filter or (not na(mtf_ma_val) and close < mtf_ma_val and mtf_ma_val < mtf_ma_val[1])
+
+// VIX Filter Logic
+vix_filter_ok = true
+if use_vix_filter and not na(vix_val)
+    vix_filter_ok := vix_trade_when_calm ? (vix_val < vix_threshold) : (vix_val > vix_threshold)
+
+// Fibonacci Filter Logic
+long_fib_filter_ok = true
+short_fib_filter_ok = true
+if use_fib_filter and not na(fib_low_val) and not na(fib_high_val)
+    target_long_fib_level = fib_low_val + fib_range * fib_long_entry_level
+    target_short_fib_level = fib_high_val - fib_range * fib_short_entry_level
+    long_fib_filter_ok := close > target_long_fib_level
+    short_fib_filter_ok := close < target_short_fib_level
+
+// --- Machine Learning Inspired Score Calculation ---
+ml_long_score = 0.0
+ml_short_score = 0.0
+var string ma_trend_up_raw_str = "N/A"
+var string ma_trend_down_raw_str = "N/A"
+var string dmi_trend_up_raw_str = "N/A"
+var string dmi_trend_down_raw_str = "N/A"
+var string rsi_long_signal_str = "N/A"
+var string rsi_short_signal_str = "N/A"
+var string kd_long_signal_str = "N/A"
+var string kd_short_signal_str = "N/A"
+var string macd_long_signal_str = "N/A"
+var string macd_short_signal_str = "N/A"
+var string volume_signal_str = "N/A"
+var string mtf_ma_trend_up_raw_str = "N/A"
+var string mtf_ma_trend_down_raw_str = "N/A"
+var string vix_signal_long_str = "N/A"
+var string vix_signal_short_str = "N/A"
+
+var int ml_long_contributors = 0
+var int ml_short_contributors = 0
+
+if use_ml_logic
+    ml_long_contributors := 0
+    ml_short_contributors := 0
+    ml_long_score := 0.0
+    ml_short_score := 0.0
+    
+    // Initialize trend signals
+    ma_trend_up_raw = close > ma_val and ma_val > ma_val[1]
+    ma_trend_down_raw = close < ma_val and ma_val < ma_val[1]
+    ma_trend_up_raw_str := f_bool_to_str(use_ma_filter and ma_trend_up_raw)
+    ma_trend_down_raw_str := f_bool_to_str(use_ma_filter and ma_trend_down_raw)
+    
+    if use_ma_filter
+        if ma_trend_up_raw
+            ml_long_score += ml_weight_ma_long
+            ml_long_contributors += 1
+        if ma_trend_down_raw
+            ml_short_score += ml_weight_ma_short
+            ml_short_contributors += 1
+
+    dmi_trend_up_raw = adx_val > adx_min_strength and di_plus > di_minus
+    dmi_trend_down_raw = adx_val > adx_min_strength and di_minus > di_plus
+    dmi_trend_up_raw_str := f_bool_to_str(use_dmi_filter and dmi_trend_up_raw)
+    dmi_trend_down_raw_str := f_bool_to_str(use_dmi_filter and dmi_trend_down_raw)
+    if use_dmi_filter
+        if dmi_trend_up_raw
+            ml_long_score += ml_weight_dmi_long
+            ml_long_contributors += 1
+        if dmi_trend_down_raw
+            ml_short_score += ml_weight_dmi_short
+            ml_short_contributors += 1
+
+    rsi_long_signal_str := f_bool_to_str(rsi_long_signal)
+    rsi_short_signal_str := f_bool_to_str(rsi_short_signal)
+    if rsi_long_signal
+        ml_long_score += ml_weight_rsi_long
+        ml_long_contributors += 1
+    if rsi_short_signal
+        ml_short_score += ml_weight_rsi_short
+        ml_short_contributors += 1
+
+    kd_long_signal_str := f_bool_to_str(kd_long_signal)
+    kd_short_signal_str := f_bool_to_str(kd_short_signal)
+    if kd_long_signal
+        ml_long_score += ml_weight_kd_long
+        ml_long_contributors += 1
+    if kd_short_signal
+        ml_short_score += ml_weight_kd_short
+        ml_short_contributors += 1
+
+    macd_long_signal_str := f_bool_to_str(macd_long_signal)
+    macd_short_signal_str := f_bool_to_str(macd_short_signal)
+    if macd_long_signal
+        ml_long_score += ml_weight_macd_long
+        ml_long_contributors += 1
+    if macd_short_signal
+        ml_short_score += ml_weight_macd_short
+        ml_short_contributors += 1
+
+    volume_signal_str := f_bool_to_str(volume_condition_met)
+    if use_volume_in_ml_score and use_volume_confirmation
+        if volume_condition_met
+            ml_long_score += ml_weight_volume_long
+            ml_long_contributors += 1
+            ml_short_score += ml_weight_volume_short
+            ml_short_contributors += 1 // Assuming volume confirmation is bullish for both
+
+    // MTF MA contribution to ML score
+    mtf_ma_trend_up_raw = not na(mtf_ma_val) and close > mtf_ma_val and mtf_ma_val > mtf_ma_val[1]
+    mtf_ma_trend_down_raw = not na(mtf_ma_val) and close < mtf_ma_val and mtf_ma_val < mtf_ma_val[1]
+    mtf_ma_trend_up_raw_str := f_bool_to_str(use_mtf_ma_in_ml_score and mtf_ma_trend_up_raw)
+    mtf_ma_trend_down_raw_str := f_bool_to_str(use_mtf_ma_in_ml_score and mtf_ma_trend_down_raw)
+    if use_mtf_ma_in_ml_score
+        if mtf_ma_trend_up_raw
+            ml_long_score += ml_weight_mtf_ma_long
+            ml_long_contributors += 1
+        if mtf_ma_trend_down_raw
+            ml_short_score += ml_weight_mtf_ma_short
+            ml_short_contributors += 1
+
+    // VIX contribution to ML score
+    vix_ml_condition_met = not na(vix_val) and (vix_trade_when_calm ? (vix_val < vix_threshold) : (vix_val > vix_threshold))
+    vix_signal_long_str := f_bool_to_str(use_vix_in_ml_score and vix_ml_condition_met) // Same condition for long/short in this setup
+    vix_signal_short_str := vix_signal_long_str
+    if use_vix_in_ml_score and vix_ml_condition_met
+        ml_long_score += ml_weight_vix_long
+        ml_long_contributors += 1
+        ml_short_score += ml_weight_vix_short
+        ml_short_contributors += 1
+
+// ————— Risk Management Logic —————
+var float daily_equity_at_start_of_day = strategy.initial_capital
+var float peak_equity_for_drawdown_calc = strategy.initial_capital
+var bool block_trades_due_to_daily_loss = false
+var bool block_trades_due_to_max_drawdown = false
+
+if dayofmonth != dayofmonth[1]
+    daily_equity_at_start_of_day := strategy.equity
+    block_trades_due_to_daily_loss := false
+
+if strategy.equity > peak_equity_for_drawdown_calc
+    peak_equity_for_drawdown_calc := strategy.equity
+
+calculated_daily_loss_pct = daily_equity_at_start_of_day > 0 ? (daily_equity_at_start_of_day - strategy.equity) / daily_equity_at_start_of_day * 100 : 0.0
+calculated_max_drawdown_pct = peak_equity_for_drawdown_calc > 0 ? (peak_equity_for_drawdown_calc - strategy.equity) / peak_equity_for_drawdown_calc * 100 : 0.0
+
+if use_max_daily_loss and calculated_daily_loss_pct >= max_daily_loss_pct
+    block_trades_due_to_daily_loss := true
+
+if use_max_drawdown and calculated_max_drawdown_pct >= max_drawdown_pct
+    block_trades_due_to_max_drawdown := true
+
+// ————— Trailing Stop Logic —————
+var float long_trailing_stop_price = na
+var float short_trailing_stop_price = na
+var bool long_trailing_active = false
+var bool short_trailing_active = false
+
+if strategy.position_size != 0
+    if strategy.position_size > 0 // Long position
+        if not long_trailing_active and use_trailing_stop and (close >= strategy.position_avg_price + trailing_stop_activation_atr_mult * atr_val)
+            long_trailing_active := true
+            long_trailing_stop_price := close - trailing_stop_atr_mult * atr_val
+        else if long_trailing_active and use_trailing_stop
+            long_trailing_stop_price := math.max(long_trailing_stop_price, close - trailing_stop_atr_mult * atr_val)
+    else // Short position
+        if not short_trailing_active and use_trailing_stop and (close <= strategy.position_avg_price - trailing_stop_activation_atr_mult * atr_val)
+            short_trailing_active := true
+            short_trailing_stop_price := close + trailing_stop_atr_mult * atr_val
+        else if short_trailing_active and use_trailing_stop
+            short_trailing_stop_price := math.min(short_trailing_stop_price, close + trailing_stop_atr_mult * atr_val)
+else 
+    if long_trailing_active or not na(long_trailing_stop_price)
+        long_trailing_active := false
+        long_trailing_stop_price := na
+    if short_trailing_active or not na(short_trailing_stop_price)
+        short_trailing_active := false
+        short_trailing_stop_price := na
+
+risk_limits_are_ok = not block_trades_due_to_daily_loss and not block_trades_due_to_max_drawdown
+
+// --- Final Entry Conditions ---
+base_long_signal = false
+if use_ml_logic
+    base_long_signal := (ml_long_score >= ml_long_entry_threshold) and (ml_long_contributors >= min_contributors_for_ml_warning) and barstate.isconfirmed
+else
+    base_long_signal := long_ma_ok and long_dmi_ok and long_oscillator_condition_met and (use_mtf_ma_filter ? long_mtf_ma_filter_ok : true) and (use_vix_filter ? vix_filter_ok : true) and (use_fib_filter ? long_fib_filter_ok : true)
+
+base_short_signal = false
+if use_ml_logic
+    base_short_signal := (ml_short_score >= ml_short_entry_threshold) and (ml_short_contributors >= min_contributors_for_ml_warning) and barstate.isconfirmed
+else
+    base_short_signal := short_ma_ok and short_dmi_ok and short_oscillator_condition_met and
+                         (use_mtf_ma_filter ? short_mtf_ma_filter_ok : true) and
+                         (use_vix_filter ? vix_filter_ok : true) and
+                         (use_fib_filter ? short_fib_filter_ok : true)
+
+final_volume_confirms_long = (use_volume_in_ml_score and use_ml_logic) ? true : volume_confirms_trade
+final_volume_confirms_short = (use_volume_in_ml_score and use_ml_logic) ? true : volume_confirms_trade
+
+longCondition = (trade_direction == "多空都做" or trade_direction == "只做多") and
+                 timeWindow and base_long_signal and final_volume_confirms_long and risk_limits_are_ok
+
+shortCondition = (trade_direction == "多空都做" or trade_direction == "只做空") and
+                  timeWindow and base_short_signal and final_volume_confirms_short and risk_limits_are_ok
+
+// ————— Strategy Execution —————
+// Determine Trade Quantity
+var float current_trade_qty = 1.0
+if use_dynamic_pos_sizing and atr_val > 0 and dps_atr_stop_mult > 0 and src > 0
+    equity_to_risk_abs = strategy.equity * (dps_risk_pct / 100.0)
+    stop_loss_distance_currency = (atr_val * dps_atr_stop_mult)
+    if syminfo.type != "stock"
+        stop_loss_distance_currency := stop_loss_distance_currency * syminfo.pointvalue
+    if stop_loss_distance_currency > 0
+        calculated_qty = equity_to_risk_abs / stop_loss_distance_currency
+        current_trade_qty := math.max(0.00001, calculated_qty)
+        if syminfo.type == "stock"
+            current_trade_qty := math.max(1.0, math.floor(current_trade_qty))
+    else
+        if effective_qty_type == strategy.percent_of_equity and src > 0
+            current_trade_qty := math.max(1.0, math.floor((strategy.equity * effective_qty_value / 100.0) / src))
+        else
+            current_trade_qty := math.max(1.0, effective_qty_value)
+else
+    if effective_qty_type == strategy.percent_of_equity and src > 0
+        current_trade_qty := math.max(1.0, math.floor((strategy.equity * effective_qty_value / 100.0) / src))
+    else
+        current_trade_qty := math.max(1.0, effective_qty_value)
+current_trade_qty := current_trade_qty > 0 ? current_trade_qty : (syminfo.type == "stock" ? 1.0 : 0.00001)
+
+can_enter_long = strategy.opentrades == 0 or (use_pyramiding and strategy.opentrades < max_pyramiding_levels)
+if longCondition and can_enter_long
+    strategy.entry("買進 (L)", strategy.long, qty = current_trade_qty)
+
+can_enter_short = strategy.opentrades == 0 or (use_pyramiding and strategy.opentrades < max_pyramiding_levels)
+if shortCondition and can_enter_short
+    strategy.entry("賣出 (S)", strategy.short, qty = current_trade_qty)
+
+// Exit Logic
+var float long_final_sl_level = na
+var float short_final_sl_level = na
+
+long_regular_sl = use_sl ? strategy.position_avg_price - atr_val * sl_atr_mult : na
+short_regular_sl = use_sl ? strategy.position_avg_price + atr_val * sl_atr_mult : na
+
+if use_trailing_stop and long_trailing_active and not na(long_trailing_stop_price)
+    long_final_sl_level := not na(long_regular_sl) ? math.max(long_regular_sl, long_trailing_stop_price) : long_trailing_stop_price
+else if not na(long_regular_sl)
+    long_final_sl_level := long_regular_sl
+else
+    long_final_sl_level := na
+
+if use_trailing_stop and short_trailing_active and not na(short_trailing_stop_price)
+    short_final_sl_level := not na(short_regular_sl) ? math.min(short_regular_sl, short_trailing_stop_price) : short_trailing_stop_price
+else if not na(short_regular_sl)
+    short_final_sl_level := short_regular_sl
+else
+    short_final_sl_level := na
+
+long_tp_level = use_tp ? strategy.position_avg_price + atr_val * tp_atr_mult : na
+short_tp_level = use_tp ? strategy.position_avg_price - atr_val * tp_atr_mult : na
+
+if strategy.position_size > 0
+    strategy.exit("多單出場 L", from_entry = "買進 (L)", stop = long_final_sl_level, limit = long_tp_level)
+
+if strategy.position_size < 0
+    strategy.exit("空單出場 S", from_entry = "賣出 (S)", stop = short_final_sl_level, limit = short_tp_level)
+
+// ————— Plotting Extras (Entry, SL/TP, Warnings, ML Debug) —————
+var float plotted_trade_entry_price = na
+var float plotted_trade_sl_price = na
+var float plotted_trade_tp_price = na
+var color plotted_trade_line_color = color.new(color.black, 100) 
+var label sl_label = na 
+var label tp_label = na 
+
+is_new_trade = strategy.opentrades > strategy.opentrades[1]
+
+if is_new_trade
+    current_atr_at_entry = atr_val[1] 
+    if strategy.position_size > 0 // Long trade
+        plotted_trade_entry_price := strategy.position_avg_price
+        plotted_trade_sl_price := use_sl ? plotted_trade_entry_price - current_atr_at_entry * sl_atr_mult : na
+        plotted_trade_tp_price := use_tp ? plotted_trade_entry_price + current_atr_at_entry * tp_atr_mult : na
+        plotted_trade_line_color := color.green
+        if show_entry_sl_tp_plots
+            if not na(sl_label)
+                label.delete(sl_label)
+            if not na(tp_label)
+                label.delete(tp_label)
+            if use_sl
+                sl_label := label.new(bar_index + 1, plotted_trade_sl_price, "停損: " + str.tostring(plotted_trade_sl_price, format.mintick), xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+            if use_tp
+                tp_label := label.new(bar_index + 1, plotted_trade_tp_price, "停利: " + str.tostring(plotted_trade_tp_price, format.mintick), xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+    else if strategy.position_size < 0 // Short trade
+        plotted_trade_entry_price := strategy.position_avg_price
+        plotted_trade_sl_price := use_sl ? plotted_trade_entry_price + current_atr_at_entry * sl_atr_mult : na
+        plotted_trade_tp_price := use_tp ? plotted_trade_entry_price - current_atr_at_entry * tp_atr_mult : na
+        plotted_trade_line_color := color.red
+        if show_entry_sl_tp_plots
+            if not na(sl_label)
+                label.delete(sl_label)
+            if not na(tp_label)
+                label.delete(tp_label)
+            if use_sl
+                sl_label := label.new(bar_index + 1, plotted_trade_sl_price, "停損: " + str.tostring(plotted_trade_sl_price, format.mintick), xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.maroon, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+            if use_tp
+                tp_label := label.new(bar_index + 1, plotted_trade_tp_price, "停利: " + str.tostring(plotted_trade_tp_price, format.mintick), xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.teal, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny)
+
+if strategy.opentrades == 0 and strategy.opentrades[1] > 0 
+    plotted_trade_entry_price := na
+    plotted_trade_sl_price := na
+    plotted_trade_tp_price := na
+    if not na(sl_label)
+        label.delete(sl_label)
+        sl_label := na
+    if not na(tp_label)
+        label.delete(tp_label)
+        tp_label := na
+
+plot(show_entry_sl_tp_plots ? plotted_trade_entry_price : na, title="進場價位 (Entry Price Line)", color=plotted_trade_line_color, style=plot.style_linebr, linewidth=1, display=display.all)
+plot(show_entry_sl_tp_plots and use_sl ? plotted_trade_sl_price : na, title="預期停損目標 (SL Target Line)", color=color.new(plotted_trade_line_color, 60), style=plot.style_linebr, linewidth=1, display=display.all)
+plot(show_entry_sl_tp_plots and use_tp ? plotted_trade_tp_price : na, title="預期停利目標 (TP Target Line)", color=plotted_trade_line_color, style=plot.style_linebr, linewidth=1, display=display.all)
+
+if (is_new_trade and strategy.position_size > 0)
+    label.new(bar_index, low - atr_val * 0.5, text="買進\n@" + str.tostring(strategy.position_avg_price, format.mintick), yloc=yloc.price, style=label.style_label_up, color=color.new(color.green,0), textcolor=color.white, size=size.small)
+
+if (is_new_trade and strategy.position_size < 0)
+    label.new(bar_index, high + atr_val * 0.5, text="賣出\n@" + str.tostring(strategy.position_avg_price, format.mintick), yloc=yloc.price, style=label.style_label_down, color=color.new(color.red,0), textcolor=color.white, size=size.small)
+
+just_closed_long = strategy.position_size == 0 and strategy.position_size[1] > 0
+just_closed_short = strategy.position_size == 0 and strategy.position_size[1] < 0
+exit_price_for_label = close 
+
+if (just_closed_long)
+    label.new(bar_index, high + atr_val * 0.5, text="多平\n@" + str.tostring(exit_price_for_label, format.mintick), yloc=yloc.price, style=label.style_label_down, color=color.new(color.blue, 70), textcolor=color.white, size=size.small)
+
+if (just_closed_short)
+    label.new(bar_index, low - atr_val * 0.5, text="空平\n@" + str.tostring(exit_price_for_label, format.mintick), yloc=yloc.price, style=label.style_label_up, color=color.new(color.purple, 70), textcolor=color.white, size=size.small)
+
+is_approaching_long_ml = use_ml_logic and (ml_long_score >= ml_long_entry_threshold * ml_warning_threshold_pct) and (ml_long_score < ml_long_entry_threshold) and (ml_long_contributors >= min_contributors_for_ml_warning) and barstate.isconfirmed
+is_approaching_short_ml = use_ml_logic and (ml_short_score >= ml_short_entry_threshold * ml_warning_threshold_pct) and (ml_short_score < ml_short_entry_threshold) and (ml_short_contributors >= min_contributors_for_ml_warning) and barstate.isconfirmed
+plotshape(use_ml_warning_alerts and is_approaching_long_ml and strategy.position_size == 0, title="ML多頭觀察提醒 (ML Long Watch)", location=location.bottom, color=color.new(color.aqua, 50), style=shape.diamond, size=size.tiny, text="多?")
+plotshape(use_ml_warning_alerts and is_approaching_short_ml and strategy.position_size == 0, title="ML空頭觀察提醒 (ML Short Watch)", location=location.top, color=color.new(color.fuchsia, 50), style=shape.diamond, size=size.tiny, text="空?")
+
+plot(use_ml_logic and is_ml_debug_on ? ml_long_score : na, title="ML Long Score (Debug)", color=color.new(color.teal,0), display=display.data_window)
+plot(use_ml_logic and is_ml_debug_on ? ml_short_score : na, title="ML Short Score (Debug)", color=color.new(color.orange,0), display=display.data_window)
+
+var label ml_debug_label_long = na
+var label ml_debug_label_short = na
+
+if use_ml_logic and is_ml_debug_on and barstate.islastconfirmedhistory
+    debug_text_long = "ML多頭評分 (L):\n"
+    debug_text_long += "總分 (LScore): " + str.tostring(ml_long_score, "#.##") + " (閾值 Th:" + str.tostring(ml_long_entry_threshold) + ") Cont: " + str.tostring(ml_long_contributors) + "\n"
+    debug_text_long += "MA(" + f_bool_to_str(use_ma_filter) + "):" + ma_trend_up_raw_str + " (W:" + str.tostring(ml_weight_ma_long) + ")\n"
+    debug_text_long += (use_mtf_ma_in_ml_score ? "MTF_MA(" + f_bool_to_str(use_mtf_ma_filter) + "):" + mtf_ma_trend_up_raw_str + " (W:" + str.tostring(ml_weight_mtf_ma_long) + ")\n" : "")
+    debug_text_long += "DMI(" + f_bool_to_str(use_dmi_filter) + "):" + dmi_trend_up_raw_str + " (W:" + str.tostring(ml_weight_dmi_long) + ")\n"
+    debug_text_long += "RSI(" + f_bool_to_str(use_rsi_entry) + "):" + rsi_long_signal_str + " (W:" + str.tostring(ml_weight_rsi_long) + ")\n"
+    debug_text_long += "KD(" + f_bool_to_str(use_kd_entry) + "):" + kd_long_signal_str + " (W:" + str.tostring(ml_weight_kd_long) + ")\n"
+    debug_text_long += "MACD(" + f_bool_to_str(use_macd_entry) + "):" + macd_long_signal_str + " (W:" + str.tostring(ml_weight_macd_long) + ")\n"
+    debug_text_long += (use_volume_in_ml_score and use_volume_confirmation ? "Vol(" + f_bool_to_str(use_volume_confirmation) + "):" + volume_signal_str + " (W:" + str.tostring(ml_weight_volume_long) + ")\n" : "")
+    debug_text_long += (use_vix_in_ml_score ? "VIX(" + f_bool_to_str(use_vix_filter) + "):" + vix_signal_long_str + " (W:" + str.tostring(ml_weight_vix_long) + ")" : "")
+    
+    if not na(ml_debug_label_long)
+        label.delete(ml_debug_label_long)
+    ml_debug_label_long := label.new(bar_index, high + atr_val * 1.5, debug_text_long, color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_left, yloc=yloc.price, textalign=text.align_left, size=size.small)
+
+    debug_text_short = "ML空頭評分 (S):\n" +
+      "總分 (SScore): " + str.tostring(ml_short_score, "#.##") + " (閾值 Th:" + str.tostring(ml_short_entry_threshold) + ") Cont: " + str.tostring(ml_short_contributors) + "\n" +
+      "MA(" + f_bool_to_str(use_ma_filter) + "):" + ma_trend_down_raw_str + " (W:" + str.tostring(ml_weight_ma_short) + ")\n" +
+      (use_mtf_ma_in_ml_score ? "MTF_MA(" + f_bool_to_str(use_mtf_ma_filter) + "):" + mtf_ma_trend_down_raw_str + " (W:" + str.tostring(ml_weight_mtf_ma_short) + ")\n" : "") +
+      "DMI(" + f_bool_to_str(use_dmi_filter) + "):" + dmi_trend_down_raw_str + " (W:" + str.tostring(ml_weight_dmi_short) + ")\n" +
+      "RSI(" + f_bool_to_str(use_rsi_entry) + "):" + rsi_short_signal_str + " (W:" + str.tostring(ml_weight_rsi_short) + ")\n" +
+      "KD(" + f_bool_to_str(use_kd_entry) + "):" + kd_short_signal_str + " (W:" + str.tostring(ml_weight_kd_short) + ")\n" +
+      "MACD(" + f_bool_to_str(use_macd_entry) + "):" + macd_short_signal_str + " (W:" + str.tostring(ml_weight_macd_short) + ")\n" +
+      (use_volume_in_ml_score and use_volume_confirmation ? "Vol(" + f_bool_to_str(use_volume_confirmation) + "):" + volume_signal_str + " (W:" + str.tostring(ml_weight_volume_short) + ")\n" : "") +
+      (use_vix_in_ml_score ? "VIX(" + f_bool_to_str(use_vix_filter) + "):" + vix_signal_short_str + " (W:" + str.tostring(ml_weight_vix_short) + ")" : "")
+
+    if not na(ml_debug_label_short)
+        label.delete(ml_debug_label_short)
+    ml_debug_label_short := label.new(bar_index, high + atr_val * 5.5, debug_text_short, color=color.new(color.orange, 20), textcolor=color.white, style=label.style_label_left, yloc=yloc.price, textalign=text.align_left, size=size.small)
+else
+    if not na(ml_debug_label_long)
+        label.delete(ml_debug_label_long)
+    ml_debug_label_long := na
+    if not na(ml_debug_label_short)
+        label.delete(ml_debug_label_short)
+        ml_debug_label_short := na
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————
+// 指標使用說明 (Indicator Usage Notes) - Premium Version:
+//
+// 1. KD, MACD, RSI:
+//    - (Same as Ultra)
+//
+// 2. 布林通道 (BB), 移動平均線 (MA), DMI:
+//    - (Same as Ultra)
+//
+// 3. 機器學習設定 (Machine Learning Settings):
+//    - (Same as Ultra, now can include MTF MA and VIX scores)
+//
+// 4. 策略預設 (Strategy Presets):
+//    - (Same as Ultra. New features like MTF, VIX, Fib, Dynamic Sizing are configured independently)
+//
+// 5. 進階設定 (Advanced Settings):
+//    - 金字塔加碼 (Pyramiding): (Same as Ultra)
+//    - 追蹤止損 (Trailing Stop): (Same as Ultra)
+//
+// 6. 風險管理 (Risk Management):
+//    - 每日最大虧損限制, 最大回撤限制: (Same as Ultra)
+//    - ATR動態倉位大小 (ATR Dynamic Position Sizing): [NEW]
+//      - 若啟用，策略會根據目前的ATR、帳戶權益和設定的單筆風險百分比來動態計算每筆交易的倉位大小。
+//      - 這有助於在不同波動性環境下保持一致的風險暴露。
+//
+// 7. 跨時間框架設定 (MTF Settings): [NEW]
+//    - 啟用更高時間框架 MA 過濾: 使用來自更高時間週期的MA作為額外的趨勢確認。
+//    - 可選擇將MTF MA納入ML評分系統。
+//
+// 8. 市場情緒設定 (Market Sentiment Settings): [NEW]
+//    - 啟用VIX市場情緒過濾: 使用VIX指數作為市場恐慌程度的指標，以過濾交易。
+//    - 可選擇將VIX條件納入ML評分系統。
+//
+// 9. 斐波那契設定 (Fibonacci Settings): [NEW]
+//    - 繪製斐波那契水平: 在圖表上繪製基於近期高低點的斐波那契回撤水平。
+//    - 啟用斐波那契過濾: 使用特定的斐波那契水平作為進場的額外確認條件。
+//
+// 注意:
+// - 本指標組合提供技術分析數據，實際的買賣決策應結合其他分析方法、市場狀況及個人風險承受能力。
+// - 您可以在指標設定中調整各項參數，並勾選/取消勾選「顯示...」來組合您想觀察的指標。
+// ————————————————————————————————————————————————————————————————————————————————————————————————————

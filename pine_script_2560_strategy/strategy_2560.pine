@@ -1,0 +1,53 @@
+//@version=5
+strategy("2560 成交量突圍選股策略", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// 計算指標
+ema25 = ta.ema(close, 25)
+vol_ma5 = ta.sma(volume, 5)
+vol_ma60 = ta.sma(volume, 60)
+
+// 繪製指標
+plot(ema25, title="25日EMA", color=color.orange)
+plot(vol_ma5, title="5日成交量MA", color=color.blue)
+plot(vol_ma60, title="60日成交量MA", color=color.red)
+
+// 定義三大買點形態
+// 【衝量】條件：股價突破25日EMA + 成交量5日均量上穿60日均量
+condition_chong = ta.crossover(close, ema25) and ta.crossover(vol_ma5, vol_ma60)
+
+// 【做量】條件：股價回踩25日EMA不破 + 成交量5日與60日均線差距小於3%
+price_near_ema25_zuo = (close >= ema25 * 0.97) and (close <= ema25 * 1.03)
+vol_ma5_close_to_ma60 = math.abs(vol_ma5 - vol_ma60) / vol_ma60 < 0.03
+condition_zuo = price_near_ema25_zuo and vol_ma5_close_to_ma60
+
+// 【縮量】條件：股價回踩25日EMA穩住 + 成交量低於60日均量
+price_near_ema25_suo = (close >= ema25 * 0.97) and (close <= ema25 * 1.03)
+vol_below_ma60 = volume < vol_ma60
+condition_suo = price_near_ema25_suo and vol_below_ma60
+
+// 繪製不同買點形態標記
+plotshape(condition_chong, title="衝量買點", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(condition_zuo, title="做量買點", location=location.belowbar, color=color.blue, style=shape.circle, size=size.small)
+plotshape(condition_suo, title="縮量買點", location=location.belowbar, color=color.red, style=shape.diamond, size=size.small)
+
+// 進場條件：任一買點形態成立
+buy_condition = condition_chong or condition_zuo or condition_suo
+if (buy_condition)
+    strategy.entry("Buy", strategy.long)
+
+// 出場條件：跌破25日EMA 或 連續3根K棒未創新高
+exit_condition1 = close < ema25
+
+// 計算連續未創新高計數器
+var int no_new_high_counter = 0
+highest_3 = ta.highest(high, 3)
+if high > highest_3[1]
+    no_new_high_counter := 0
+else
+    no_new_high_counter := no_new_high_counter + 1
+
+exit_condition2 = no_new_high_counter >= 3
+
+// 執行出場
+if (exit_condition1 or exit_condition2)
+    strategy.close("Buy")

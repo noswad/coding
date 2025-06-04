@@ -1,0 +1,229 @@
+//@version=5
+strategy("2560 成交量突圍選股策略 - 優化版", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=3, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.1, slippage=10, pyramiding=0, calc_on_order_fills=true, calc_on_every_tick=false, max_bars_back=5000, process_orders_on_close=true, currency="USD")
+
+// 策略參數設定 (可在TradingView策略測試器中調整)
+ema_length = input.int(25, "EMA週期", minval=5, maxval=100, step=1, group="均線設定")
+vol_ma_short = input.int(5, "成交量短期均線", minval=1, maxval=20, step=1, group="成交量設定")
+vol_ma_long = input.int(60, "成交量長期均線", minval=20, maxval=200, step=5, group="成交量設定")
+price_ma_long_len = input.int(60, "價格長期均線週期", group="均線設定", tooltip="用於判斷主要趨勢的長期價格均線")
+
+adx_length = input.int(14, "ADX週期", minval=7, maxval=30, step=1, group="趨勢過濾")
+adx_threshold = input.int(20, "ADX趨勢閾值", minval=15, maxval=50, step=1, group="趨勢過濾") // Lowered for more signals
+
+rsi_length = input.int(14, "RSI週期", group="RSI/MACD")
+rsi_buy_level = input.float(50, "RSI買入閾值", group="RSI/MACD", step=1)
+macd_fast_len = input.int(12, "MACD快線週期", group="RSI/MACD")
+macd_slow_len = input.int(26, "MACD慢線週期", group="RSI/MACD")
+macd_signal_len = input.int(9, "MACD信號線週期", group="RSI/MACD")
+
+atr_period = input.int(14, "ATR週期 (停損用)", group="風險管理", tooltip="用於計算ATR停損的週期")
+stop_loss_pct = input.float(2.0, "停損百分比 (%)", group="風險管理", step=0.1, minval=0.1, tooltip="例如輸入 2 代表 -2%")
+take_profit_pct = input.float(4.0, "停利百分比 (%)", group="風險管理", step=0.1, minval=0.1, tooltip="例如輸入 4 代表 +4%")
+min_bars_between_trades = input.int(5, "交易間隔最小K棒數", minval=1, maxval=20, step=1, group="交易頻率")
+execution_delay = input.int(0, "執行延遲(K棒數)", minval=0, maxval=5, step=1, tooltip="process_orders_on_close=true時，0表示下一根K棒開盤執行。1表示再延遲一根。", group="回測設定") // 減少延遲
+use_prev_day_close = input.bool(true, "使用前一天收盤價計算指標", tooltip="避免日內前瞻性偏見", group="回測設定")
+
+// 設定回測時間範圍 (簡化為使用TradingView內建的日期範圍)
+use_date_filter = input.bool(false, "啟用自定義日期過濾", group="回測設定")
+start_year = input.int(2010, "開始年份", minval=1970, maxval=2050, group="回測設定")
+start_month = input.int(1, "開始月份", minval=1, maxval=12, group="回測設定")
+start_day = input.int(1, "開始日期", minval=1, maxval=31, group="回測設定")
+end_year = input.int(2025, "結束年份", minval=1970, maxval=2050, group="回測設定")
+end_month = input.int(12, "結束月份", minval=1, maxval=12, group="回測設定")
+end_day = input.int(31, "結束日期", minval=1, maxval=31, group="回測設定")
+
+start_time = timestamp(start_year, start_month, start_day, 0, 0)
+end_time = timestamp(end_year, end_month, end_day, 23, 59)
+is_within_backtest_period = use_date_filter ? (time >= start_time and time <= end_time) : true
+
+// 指標計算 (防止前瞻性偏見)
+price_src = use_prev_day_close and timeframe.isdaily ? close[1] : close
+// 修正成交量計算重複定義問題
+volume_src = use_prev_day_close and timeframe.isdaily ? volume[1] : volume
+// 確保有足夠的數據進行計算 (新增 bar_index 驗證)
+// 修正 has_enough_data 邏輯，確保在歷史回測中能正確判斷數據充足性
+has_enough_data = bar_index >= math.max(200, vol_ma_long, ema_length, adx_length * 2, price_ma_long_len, macd_slow_len + macd_signal_len) // 確保所有指標有足夠數據
+
+ema25 = ta.ema(price_src, ema_length)
+price_ma_long_val = ta.sma(price_src, price_ma_long_len)
+vol_ma5 = ta.sma(volume_src, vol_ma_short)
+vol_ma60 = ta.sma(volume_src, vol_ma_long)
+// current_atr_val = ta.atr(atr_period) // ATR SL/TP 暫時移除，改用固定百分比
+
+rsi_val = ta.rsi(price_src, rsi_length)
+[macd_line_val, macd_signal_line_val, macd_hist_val] = ta.macd(price_src, macd_fast_len, macd_slow_len, macd_signal_len)
+
+// ADX 趨勢過濾
+// 修正 ADX 計算 (使用 ta.dmi 並驗證數據有效性)
+// 修正 ADX 計算 (正確使用 ta.dmi 的返回值)
+// 初始化 ADX 趨勢變數 (解決重複宣告問題)
+var bool is_strong_trend = na
+var bool is_uptrend_momentum = na // 新增：判斷是否為上升趨勢動能
+// var bool adx_is_rising = na       // Temporarily removed to increase frequency
+[adx_val, di_plus, di_minus] = ta.dmi(adx_length, adx_length)
+is_strong_trend := adx_val > adx_threshold and not na(adx_val)
+is_uptrend_momentum := not na(di_plus) and not na(di_minus) and di_plus > di_minus // DI+ 在 DI- 之上
+// adx_is_rising := not na(adx_val) and adx_val > adx_val[1] and (na(adx_val[2]) or adx_val[1] > adx_val[2]) // ADX連續兩根K棒上升
+
+// 進場條件優化
+var int last_entry_bar = na
+
+// --- 重新設計的順勢進場邏輯 ---
+// 1. EMA 多頭排列: 短期EMA在長期EMA之上，且價格在短期EMA之上
+ema_aligned_bullish = ema25 > price_ma_long_val and close > ema25
+
+// 2. MACD 黃金交叉: MACD線向上穿越訊號線
+macd_golden_cross = ta.crossover(macd_line_val, macd_signal_line_val)
+
+// 3. 成交量突破 (2560戰法啟發): 5日成交量均線向上穿越60日成交量均線
+volume_breakout_ma = ta.crossover(vol_ma5, vol_ma60)
+// 可選: 當前成交量顯著大於長期均量 (作為額外確認或替代)
+// volume_surge = volume_src > vol_ma60 * 1.5 
+
+// 4. ADX 確認趨勢強度與方向
+adx_trend_confirm = is_strong_trend and is_uptrend_momentum
+
+// 5. RSI 確認多頭動能 (可選，但有助於過濾)
+rsi_bullish_confirm = rsi_val > rsi_buy_level
+
+// 綜合進場條件 - 拆分為多個條件以避免語法錯誤
+var bool condition_part1 = false
+var bool condition_part2 = false
+var bool buy_condition_new = false
+
+// 第一部分條件
+condition_part1 := ema_aligned_bullish and macd_golden_cross and volume_breakout_ma
+
+// 第二部分條件
+condition_part2 := adx_trend_confirm and rsi_bullish_confirm and has_enough_data and (na(last_entry_bar) or (bar_index - last_entry_bar >= min_bars_between_trades))
+
+// 最終綜合條件
+buy_condition_new := condition_part1 and condition_part2
+
+// --- 策略執行 ---
+if (buy_condition_new and is_within_backtest_period)
+    strategy.entry("Buy", strategy.long)
+    last_entry_bar := bar_index
+    // 設定停損停利 (基於收盤價計算，因 process_orders_on_close=true, 訂單在下一根K棒開盤成交)
+    // 實際成交價會是下一根K棒的開盤價，但此處基於信號K棒的收盤價設定SL/TP水平
+    entry_price_ref = close 
+    stop_loss_price = entry_price_ref * (1 - stop_loss_pct / 100)
+    take_profit_price = entry_price_ref * (1 + take_profit_pct / 100)
+    strategy.exit("Buy Exit", from_entry="Buy", stop=stop_loss_price, limit=take_profit_price)
+
+// 出場條件 (原始 + 優化)
+exit_condition1 = close < ema25
+
+// 連續 3 根 K 棒未創新高
+var int no_new_high_counter = 0
+highest_3 = ta.highest(high, 3)
+if high > highest_3[1]
+    no_new_high_counter := 0
+else
+    no_new_high_counter := no_new_high_counter + 1
+
+exit_condition2 = no_new_high_counter >= 5 // 給予更多K棒形成新高
+
+// 執行邏輯出場 (除了SL/TP之外的出場條件)
+// 注意: strategy.exit 會管理SL/TP。此處的 strategy.close 用於其他邏輯出場。
+if (strategy.position_size > 0 and (exit_condition1 or exit_condition2) and is_within_backtest_period)
+    strategy.close("Buy")
+
+// 可視化增強
+plot(ema25, title="25日EMA", color=color.orange, linewidth=2)
+plot(price_ma_long_val, title="價格長期SMA", color=color.new(color.blue, 30), linewidth=2)
+plot(vol_ma5, title="5日成交量MA", color=color.blue)
+plot(vol_ma60, title="60日成交量MA", color=color.red)
+// 繪製ADX相關指標
+plot(adx_val, title="ADX", color=color.new(color.purple, 50))
+plot(di_plus, title="DI+", color=color.new(color.green, 50))
+plot(di_minus, title="DI-", color=color.new(color.red, 50))
+hline(adx_threshold, "ADX Threshold", color=color.gray, linestyle=hline.style_dashed)
+// Plot RSI and MACD in a separate pane if desired, or use data window to check values
+// plot(rsi_val, title="RSI", color=color.new(color.fuchsia, 0), display=display.pane)
+// hline(rsi_buy_level, "RSI Buy Level", color=color.gray, linestyle=hline.style_dashed, display=display.pane)
+// plot(macd_line_val, title="MACD Line", color=color.blue, display=display.pane)
+// plot(macd_signal_line_val, title="Signal Line", color=color.orange, display=display.pane)
+
+// 標示新的進場條件信號
+plotshape(buy_condition_new, title="順勢買點", location=location.belowbar, color=color.green, style=shape.triangleup, text="買入", size=size.small)
+
+// 回測績效指標
+// Custom Max Drawdown Calculation
+var float max_drawdown = 0.0
+var float peak_equity = 0.0
+var float current_drawdown = 0.0
+
+// 更新績效指標
+if strategy.closedtrades > 0
+    // 計算最大回撤
+    peak_equity := math.max(peak_equity, strategy.equity)
+    current_drawdown := (peak_equity - strategy.equity) / peak_equity * 100
+    max_drawdown := math.max(max_drawdown, current_drawdown)
+
+// 使用內建變數計算勝率和獲利因子，與測試器摘要一致
+win_rate_display = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0.0
+profit_factor_display = strategy.grossloss > 0 ? (strategy.grossprofit / strategy.grossloss) : (strategy.grossprofit > 0 ? 99999.0 : 0.0) // Handle division by zero if no losses
+
+// 顯示績效指標表格
+var table performance_table = table.new(position.top_right, 5, 7, color.black, color.white, 1, color.gray, 1)
+
+// 修正表格顯示邏輯 (統一使用 0 為基礎索引)
+// 優化績效表格顯示邏輯
+if barstate.islast
+    if strategy.closedtrades > 0 // 僅當有交易時顯示詳細績效
+        table.cell(performance_table, 0, 0, "回測績效指標", bgcolor=color.blue, text_color=color.white)
+        table.cell(performance_table, 0, 1, "總交易次數", bgcolor=color.gray, text_color=color.white)
+        table.cell(performance_table, 0, 2, "勝率 (%)", bgcolor=color.gray, text_color=color.white)
+        table.cell(performance_table, 0, 3, "盈虧比", bgcolor=color.gray, text_color=color.white)
+        table.cell(performance_table, 0, 4, "最大回撤 (%)", bgcolor=color.gray, text_color=color.white)
+        table.cell(performance_table, 0, 5, "總獲利", bgcolor=color.gray, text_color=color.white)
+        table.cell(performance_table, 0, 6, "回測期間", bgcolor=color.gray, text_color=color.white)
+
+        table.cell(performance_table, 1, 1, str.tostring(strategy.closedtrades), text_color=color.black)
+        table.cell(performance_table, 1, 2, str.tostring(math.round(win_rate_display, 2)), text_color=color.black)
+        table.cell(performance_table, 1, 3, str.tostring(math.round(profit_factor_display, 2)), text_color=color.black)
+        table.cell(performance_table, 1, 4, str.tostring(math.round(max_drawdown, 2)), text_color=color.black)
+        table.cell(performance_table, 1, 5, str.tostring(math.round(strategy.netprofit, 2)), text_color=color.black)
+        date_range_text = use_date_filter ? (str.tostring(start_year) + "-" + str.tostring(start_month) + "-" + str.tostring(start_day) + " 至 " + str.tostring(end_year) + "-" + str.tostring(end_month) + "-" + str.tostring(end_day)) : "全部歷史"
+        table.cell(performance_table, 1, 6, date_range_text, text_color=color.black)
+    else
+        // Display "無交易紀錄" centered across the first row visually, as colspan is not supported.
+        // The table has 5 columns (indexed 0-4). We'll make the first row appear as a single cell.
+        // First, set the background and empty text for all cells in the first row.
+        for _col_idx = 0 to 4 // Iterate through columns 0 to 4
+            table.cell(performance_table, _col_idx, 0, "", bgcolor=color.orange, text_color=color.white)
+        // Then, place the "無交易紀錄" text in the middle cell (column 2) of this row for centering.
+        table.cell(performance_table, 2, 0, "無交易紀錄", bgcolor=color.orange, text_color=color.white, text_halign = text.align_center)
+
+// 繪製權益曲線
+plot(strategy.equity, title="權益曲線", color=color.purple, linewidth=2)
+
+// 添加交易標記和註解 (適用於TradingView策略測試器)
+plotshape(strategy.position_size > strategy.position_size[1], title="買入標記", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(strategy.position_size < strategy.position_size[1] and strategy.position_size[1] > 0, title="賣出標記", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// 顯示交易資訊標籤
+if (strategy.position_size > strategy.position_size[1])
+    label.new(bar_index, low, text="買入\n價格: " + str.tostring(close), color=color.green, textcolor=color.white, style=label.style_label_up, yloc=yloc.belowbar)
+
+if (strategy.position_size < strategy.position_size[1] and strategy.position_size[1] > 0)
+    label.new(bar_index, high, text="賣出\n價格: " + str.tostring(close) + "\n利潤: " + str.tostring(math.round((close - strategy.position_avg_price) / strategy.position_avg_price * 100, 2)) + "%", color=color.red, textcolor=color.white, style=label.style_label_down, yloc=yloc.abovebar)
+
+// 添加策略測試器報告註解
+if (use_date_filter and time >= end_time)
+    strategy.close_all(comment="回測結束")
+
+// 添加調試信息 - 使用單獨的標籤顯示每個設置
+if (barstate.islast)
+    label.new(bar_index, high, "日期過濾: " + (use_date_filter ? "開啟" : "關閉"), 
+              color=color.blue, textcolor=color.white, style=label.style_label_down, yloc=yloc.price)
+    
+    label.new(bar_index, high * 0.98, "執行延遲: " + str.tostring(execution_delay) + " 根K線", 
+              color=color.blue, textcolor=color.white, style=label.style_label_down, yloc=yloc.price)
+    
+    label.new(bar_index, high * 0.96, "使用前日收盤: " + (use_prev_day_close ? "是" : "否"), 
+              color=color.blue, textcolor=color.white, style=label.style_label_down, yloc=yloc.price)
+    
+    label.new(bar_index, high * 0.94, "ADX閾值: " + str.tostring(adx_threshold), 
+              color=color.blue, textcolor=color.white, style=label.style_label_down, yloc=yloc.price)

@@ -1,0 +1,216 @@
+//@version=5
+strategy("綜合指標策略 (Indicator Combo Strategy)",
+     shorttitle="綜合策略",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, // 例如，每筆交易使用10%的資金
+     commission_type=strategy.commission.percent,
+     commission_value=0.1) // 例如，0.1% 的手續費
+
+// ————— General Settings —————
+group_general = "一般設定 (General Settings)"
+src = input.source(close, "來源 (Source)", group = group_general)
+
+// ————— Bollinger Bands (BB) —————
+group_bb = "布林通道 (Bollinger Bands)"
+show_bb_plot = input.bool(true, "繪製布林通道 (Plot Bollinger Bands)", group = group_bb, inline="bb1")
+bb_len = input.int(20, "長度 (Length)", minval=1, group = group_bb, inline="bb2")
+bb_mult = input.float(2.0, "標準差倍數 (StdDev Multiplier)", minval=0.001, maxval=50, group = group_bb, inline="bb2")
+
+bb_basis = ta.sma(src, bb_len)
+bb_dev = bb_mult * ta.stdev(src, bb_len)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+plot(show_bb_plot ? bb_basis : na, "BB 中軌 (Basis)", color=color.new(color.blue, 0))
+plot_bb_upper = plot(show_bb_plot ? bb_upper : na, "BB 上軌 (Upper)", color=color.new(color.gray, 50))
+plot_bb_lower = plot(show_bb_plot ? bb_lower : na, "BB 下軌 (Lower)", color=color.new(color.gray, 50))
+fill(plot_bb_upper, plot_bb_lower, color=color.new(color.gray, 90), title="BB 背景填充 (Fill)", display = show_bb_plot ? display.all : display.none)
+
+// ————— Moving Average (MA) —————
+group_ma = "移動平均線 (Moving Average)"
+show_ma_plot = input.bool(true, "繪製移動平均線 (Plot MA)", group = group_ma, inline="ma1")
+ma_type = input.string("SMA", "類型 (Type)", options=["SMA", "EMA", "WMA", "RMA", "VWMA"], group = group_ma, inline="ma2")
+ma_len = input.int(50, "長度 (Length)", minval=1, group = group_ma, inline="ma2")
+
+f_ma(source, length, type) =>
+    float result = na
+    if type == "SMA"
+        result := ta.sma(source, length)
+    if type == "EMA"
+        result := ta.ema(source, length)
+    if type == "WMA"
+        result := ta.wma(source, length)
+    if type == "RMA"
+        result := ta.rma(source, length)
+    if type == "VWMA"
+        result := ta.vwma(source, length)
+    result
+
+ma_val = f_ma(src, ma_len, ma_type)
+plot(show_ma_plot ? ma_val : na, "MA", color=color.new(color.orange, 0))
+
+// ————— Directional Movement Index (DMI) —————
+group_dmi = "DMI (Directional Movement Index)"
+dmi_len = input.int(14, "DI 長度 (DI Length)", minval=1, group = group_dmi, inline="dmi2")
+adx_smooth = input.int(14, "ADX 平滑長度 (ADX Smoothing)", minval=1, group = group_dmi, inline="dmi2")
+
+[di_plus, di_minus, adx_val] = ta.dmi(dmi_len, adx_smooth)
+
+// ————— Stochastic (KD) —————
+group_kd = "KD (Stochastic)"
+kd_k_period = input.int(14, "%K 週期 (K Period)", minval=1, group = group_kd, inline="kd2") // Lookback period for High/Low
+kd_k_smooth = input.int(3, "%K 平滑 (K Smoothing)", minval=1, group = group_kd, inline="kd3") // Smoothing for Slow %K
+kd_d_period = input.int(3, "%D 平滑 (D Smoothing)", minval=1, group = group_kd, inline="kd3") // Smoothing for %D (Signal Line)
+
+fast_k = ta.stoch(close, high, low, kd_k_period)
+slow_k = ta.sma(fast_k, kd_k_smooth) // Slow %K
+slow_d = ta.sma(slow_k, kd_d_period) // %D
+
+// ————— Relative Strength Index (RSI) —————
+group_rsi = "RSI (Relative Strength Index)"
+rsi_len = input.int(14, "長度 (Length)", minval=1, group = group_rsi, inline="rsi2")
+
+rsi_val = ta.rsi(src, rsi_len)
+
+// ————— MACD (Moving Average Convergence Divergence) —————
+group_macd = "MACD"
+macd_fast_len = input.int(12, "快速EMA長度 (Fast Length)", minval=1, group = group_macd, inline="macd2")
+macd_slow_len = input.int(26, "慢速EMA長度 (Slow Length)", minval=1, group = group_macd, inline="macd2")
+macd_signal_len = input.int(9, "訊號線EMA長度 (Signal Length)", minval=1, group = group_macd, inline="macd3")
+
+[macd_line, macd_signal_line, macd_hist] = ta.macd(src, macd_fast_len, macd_slow_len, macd_signal_len)
+
+// ————— Strategy Settings —————
+group_strategy = "策略設定 (Strategy Settings)"
+
+// Trade Direction
+trade_direction = input.string("多空都做", "交易方向 (Trade Direction)", options=["多空都做", "只做多", "只做空"], group = group_strategy, inline="s0_dir")
+
+// Entry Logic Switches
+use_ma_filter = input.bool(true, "使用 MA 趨勢過濾 (Use MA Trend Filter)", group = group_strategy, inline="s1_ma")
+use_dmi_filter = input.bool(true, "使用 DMI 趨勢過濾 (Use DMI Trend Filter)", group = group_strategy, inline="s1_dmi")
+
+use_rsi_entry = input.bool(true, "使用 RSI 進場 (Use RSI Entry)", group = group_strategy, inline="s2_rsi")
+rsi_entry_ob = input.int(70, "RSI 進場超買水平 (RSI Entry Overbought)", group = group_strategy, minval=50, maxval=100, inline="s2_rsi_val")
+rsi_entry_os = input.int(30, "RSI 進場超賣水平 (RSI Entry Oversold)", group = group_strategy, minval=0, maxval=50, inline="s2_rsi_val")
+
+use_kd_entry = input.bool(false, "使用 KD 進場 (Use KD Entry)", group = group_strategy, inline="s3_kd")
+kd_entry_ob = input.int(80, "KD 進場超買水平 (KD Entry Overbought)", group = group_strategy, minval=50, maxval=100, inline="s3_kd_val")
+kd_entry_os = input.int(20, "KD 進場超賣水平 (KD Entry Oversold)", group = group_strategy, minval=0, maxval=50, inline="s3_kd_val")
+
+use_macd_entry = input.bool(false, "使用 MACD 進場 (Use MACD Entry)", group = group_strategy, inline="s4_macd")
+
+adx_min_strength = input.int(20, "ADX 最小趨勢強度 (ADX Min Trend Strength)", group = group_strategy, minval=0, inline="s5_adx")
+
+// Volume Confirmation
+use_volume_confirmation = input.bool(false, "使用成交量確認 (Use Volume Confirmation)", group = group_strategy, inline="s6_vol")
+volume_ma_len = input.int(20, "成交量均線長度 (Volume MA Length)", group = group_strategy, minval=1, tooltip = "僅在啟用成交量確認時有效 (Only effective if Volume Confirmation is enabled)", inline="s6_vol_len")
+
+// SL/TP Settings
+atr_period = input.int(14, "ATR 週期 (ATR Period)", group = group_strategy, minval=1, inline="sl_tp_atr")
+atr_val = ta.atr(atr_period)
+
+use_sl = input.bool(true, "使用停損 (Use Stop Loss)", group = group_strategy, inline="sl")
+sl_atr_mult = input.float(2.0, "停損 ATR 倍數 (SL ATR Multiplier)", group = group_strategy, minval=0.1, inline="sl")
+
+use_tp = input.bool(true, "使用停利 (Use Take Profit)", group = group_strategy, inline="tp")
+tp_atr_mult = input.float(3.0, "停利 ATR 倍數 (TP ATR Multiplier)", group = group_strategy, minval=0.1, inline="tp")
+
+// Backtesting Period
+testPeriodStart = input.time(timestamp("01 Jan 2020 00:00 +0000"), "開始回測時間 (Backtest Start Time)", group = group_strategy)
+testPeriodEnd = input.time(timestamp("01 Jan 2024 00:00 +0000"), "結束回測時間 (Backtest End Time)", group = group_strategy)
+
+// ————— Entry Conditions —————
+timeWindow = time >= testPeriodStart and time <= testPeriodEnd or (testPeriodStart == testPeriodEnd) // If start=end, assume full history
+
+// Long Entry Conditions
+long_ma_ok = not use_ma_filter or (close > ma_val and ma_val > ma_val[1])
+long_dmi_ok = not use_dmi_filter or (adx_val > adx_min_strength and di_plus > di_minus)
+
+rsi_long_signal = use_rsi_entry and ta.crossover(rsi_val, rsi_entry_os) and barstate.isconfirmed
+kd_long_signal = use_kd_entry and (slow_k < kd_entry_os and ta.crossover(slow_k, slow_d)) and barstate.isconfirmed
+macd_long_signal = use_macd_entry and ta.crossover(macd_line, macd_signal_line) and barstate.isconfirmed
+
+long_oscillator_fired = (use_rsi_entry and rsi_long_signal) or
+                         (use_kd_entry and kd_long_signal) or
+                         (use_macd_entry and macd_long_signal)
+long_oscillator_active = use_rsi_entry or use_kd_entry or use_macd_entry
+long_oscillator_condition_met = not long_oscillator_active or long_oscillator_fired // If no oscillator active, condition met. If active, one must fire.
+
+// Volume Confirmation Logic
+avg_volume = ta.sma(volume, volume_ma_len)
+volume_confirms_long = not use_volume_confirmation or (volume > avg_volume) // 可調整倍數，例如 avg_volume * 1.1
+
+longCondition = (trade_direction == "多空都做" or trade_direction == "只做多") and
+                 timeWindow and long_ma_ok and long_dmi_ok and long_oscillator_condition_met and volume_confirms_long
+
+    
+    // Debugging plotshapes for long conditions
+    // plotshape(volume_confirms_long and use_volume_confirmation, "Vol Confirms Long", shape.diamond, location.bottom, color.new(color.purple, 30), size=size.tiny)
+    // plotshape(timeWindow, "Time Window", shape.triangleup, location.belowbar, color.new(color.gray, 50), size=size.tiny)
+    // plotshape(long_ma_ok, "MA OK", shape.triangleup, location.belowbar, color.new(color.blue, 50), size=size.tiny, offset = -1)
+    // plotshape(long_dmi_ok, "DMI OK", shape.triangleup, location.belowbar, color.new(color.green, 50), size=size.tiny, offset = -2)
+    // plotshape(long_oscillator_condition_met, "Oscillator OK", shape.triangleup, location.belowbar, color.new(color.purple, 50), size=size.tiny, offset = -3)
+    // plotshape(longCondition, "Long Condition Met", shape.circle, location.belowbar, color.new(color.lime, 0), size=size.small)
+
+// Short Entry Conditions
+short_ma_ok = not use_ma_filter or (close < ma_val and ma_val < ma_val[1])
+short_dmi_ok = not use_dmi_filter or (adx_val > adx_min_strength and di_minus > di_plus)
+
+rsi_short_signal = use_rsi_entry and ta.crossunder(rsi_val, rsi_entry_ob) and barstate.isconfirmed
+kd_short_signal = use_kd_entry and (slow_k > kd_entry_ob and ta.crossunder(slow_k, slow_d)) and barstate.isconfirmed
+macd_short_signal = use_macd_entry and ta.crossunder(macd_line, macd_signal_line) and barstate.isconfirmed
+
+short_oscillator_fired = (use_rsi_entry and rsi_short_signal) or
+                          (use_kd_entry and kd_short_signal) or
+                          (use_macd_entry and macd_short_signal)
+short_oscillator_active = use_rsi_entry or use_kd_entry or use_macd_entry
+short_oscillator_condition_met = not short_oscillator_active or short_oscillator_fired
+
+// Volume Confirmation Logic for Short
+volume_confirms_short = not use_volume_confirmation or (volume > avg_volume) // 可調整倍數
+
+shortCondition = (trade_direction == "多空都做" or trade_direction == "只做空") and
+                  timeWindow and short_ma_ok and short_dmi_ok and short_oscillator_condition_met and volume_confirms_short
+
+// ————— Strategy Execution —————
+if longCondition and strategy.position_size == 0
+    strategy.entry("買進", strategy.long)
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("賣出", strategy.short)
+
+// Exit Logic (Stop Loss and Take Profit)
+long_sl_price = strategy.position_avg_price - atr_val * sl_atr_mult
+long_tp_price = strategy.position_avg_price + atr_val * tp_atr_mult
+
+short_sl_price = strategy.position_avg_price + atr_val * sl_atr_mult
+short_tp_price = strategy.position_avg_price - atr_val * tp_atr_mult
+
+if strategy.position_size > 0 // If long position is active
+    strategy.exit("多單出場", from_entry = "買進", stop = use_sl ? long_sl_price : na, limit = use_tp ? long_tp_price : na)
+
+if strategy.position_size < 0 // If short position is active
+    strategy.exit("空單出場", from_entry = "賣出", stop = use_sl ? short_sl_price : na, limit = use_tp ? short_tp_price : na)
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————
+// 指標使用說明 (Indicator Usage Notes):
+//
+// 1. KD (隨機指標), MACD (指數平滑異同移動平均線), RSI (相對強弱指標):
+//    - 主要用於判斷市場是否處於超買或超賣狀態。
+//    - 觀察指標的背離現象 (價格創新高/低，但指標未同步)，可能預示趨勢反轉。
+//    - MACD 的黃金交叉 (MACD線由下往上穿越訊號線) 和死亡交叉 (MACD線由上往下穿越訊號線) 可作為買賣參考。
+//    - RSI 和 KD 進入超買區 (如 RSI > 70, KD > 80) 後回落，或進入超賣區 (如 RSI < 30, KD < 20) 後回升，可視為潛在訊號。
+//
+// 2. 布林通道 (Bollinger Bands), 移動平均線 (MA), DMI (趨向指標):
+//    - MA 的方向指示趨勢 (例如，價格在MA之上且MA向上，為上升趨勢)。
+//    - 布林通道的寬窄表示市場波動性大小。價格觸及上下軌可能意味著支撐或壓力。通道收窄 (squeeze) 後的擴張，常伴隨較大行情。
+//    - DMI 中的 ADX 線用來衡量趨勢的強度。ADX 上升代表趨勢增強 (無論漲跌)，ADX 下降代表趨勢減弱或進入盤整。
+//    - +DI 與 -DI 的交叉可作為趨勢方向改變的參考 (+DI 上穿 -DI 為多頭訊號，反之為空頭訊號)，需結合 ADX 強度判斷。
+//
+// 注意:
+// - 本指標組合提供技術分析數據，實際的買賣決策應結合其他分析方法、市場狀況及個人風險承受能力。
+// - 您可以在指標設定中調整各項參數，並勾選/取消勾選「顯示...」來組合您想觀察的指標。
+// ————————————————————————————————————————————————————————————————————————————————————————————————————

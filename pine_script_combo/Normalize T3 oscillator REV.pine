@@ -1,0 +1,178 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BackQuant
+
+//@version=5
+indicator(title="Normalised T3 Oscillator [BackQuant]", 
+         shorttitle="Normalised T3 [BackQuant]", 
+         overlay=false)
+
+import TradingView/ta/7 as ta
+
+// Define User Inputs
+simple int len           =    input.int(2, "T3 Calculation Period", group = "Calculation", inline = "1")
+series float source      =    input.source(close, "Calculation Source", group = "Calculation", inline = "1")
+simple float vf          =    input.float(0.7, "T3 Volume Factor", group = "Calculation", inline = "2")
+simple int norm_period   =    input.int(title='Normalisation Period', defval=50, minval=1, group = "Calculation", inline = "2")
+simple bool showosc      =    input.bool(true, "Show Oscillator?", group = "Signals")
+simple bool showma       =    input.bool(true, "Show Oscillator Moving Average", group = "Signals", tooltip = "If you are going to use the moving average as the signal line, go onto the style menu and change the moving average line into columns")
+string matype            =    input.string("SMA", title = "Moving Average Type", options=["SMA","EMA","DEMA","TEMA","RMA","WMA","HMA","T3","ALMA","LINREG","VWMA"], group = "Signals")
+simple int malen         =    input.int(18, "MA Period", group = "Signals")
+simple bool paintCandles =    input.bool(false, "Paint Candles according to Trend?", group = "UI Settings")
+simple bool showstatic   =    input.bool(true, "Show Static Levels?", group = "UI Settings")
+
+// Call put T3
+subject = ta.t3(source, len, vf)
+// Normalisation Calculation
+lowest = ta.lowest(subject, norm_period)
+highest = ta.highest(subject, norm_period)
+plotosc = (subject - lowest) / (highest - lowest) - 0.50
+
+f_ma(src, len, type) =>
+    switch type 
+        "SMA"    => ta.sma(src, len)
+        "EMA"    => ta.ema(src, len)
+        "DEMA"   => ta.dema(src, len)
+        "TEMA"   => ta.tema(src, len)
+        "RMA"    => ta.rma(src, len)
+        "WMA"    => ta.wma(src, len)
+        "HMA"    => ta.hma(src, len)
+        "T3"     => ta.t3(src, len, 0.7)
+        "ALMA"   => ta.alma(src, len, 0, 0.6)
+        "LINREG" => ta.linreg(src, len, 0)
+        "VWMA"   => ta.vwma(src, len)
+// Moving Average Out
+sig_ma = f_ma(plotosc, malen, matype)
+
+// Conditional Oscillator Plot Color
+var plotcol = #1dcaff4d
+if plotosc > 0 and plotosc<0.125
+    plotcol := #1dcaff4d
+if plotosc > 0 and plotosc>0.125
+    plotcol := #1e9b254d
+if plotosc > 0 and plotosc>0.25
+    plotcol := #00ff003d
+if plotosc > 0 and plotosc>0.4
+    plotcol := #00ff0080
+if plotosc > 0 and plotosc>0.49
+    plotcol := #33ff00fc
+if plotosc < 0 and plotosc>-0.125
+    plotcol := #e651004d
+if plotosc < 0 and plotosc<-.125
+    plotcol := #7715154d
+if plotosc < 0 and plotosc<-0.25
+    plotcol := #ff00004d
+if plotosc < 0 and plotosc<-0.4
+    plotcol := #ff000080
+if plotosc < 0 and plotosc<-0.49
+    plotcol := #ff0000
+
+// Colouring
+osbgcol          =       #00e6764d
+obbgcol          =       #ff52524d
+obcol            =       #ff0000fc
+oscol            =       #00ff00fc 
+midcol           =       #ffffff4d 
+
+// Plotting (確保原有圖形完整)
+plot(showosc ? plotosc : na, 'T3 Normalised', color=plotcol, linewidth=2, style=plot.style_columns)
+plot(showma ? sig_ma : na, "Moving Average", color=color.white)
+obupper = plot(showstatic ? 0.5 : na, "+", color=obcol)
+osupper = plot(showstatic ? -0.4 : na, "-", color=oscol)
+oblower = plot(showstatic ? 0.4 : na, "+", color=obcol)
+oslower = plot(showstatic ? -0.5 : na, "-", color=oscol)
+fill(obupper, oblower, color=#7715154d, title='OB Fill')
+fill(osupper, oslower, color=#1e9b254d, title='OS Fill')
+hline(0, "0 Line", color=midcol, linestyle=hline.style_solid)
+
+// Bar Colour
+var barColour = #ffffff
+if plotosc > 0 
+    barColour := #00ff00
+else if plotosc < 0
+    barColour := #ff0000
+
+// barcolor
+barcolor(paintCandles ? barColour : na)
+
+// Alert Conditions
+alertcondition(ta.crossover(plotosc, 0), title="Normalised T3 Long", message="Normalised T3 Long {{exchange}}:{{ticker}}")
+alertcondition(ta.crossunder(plotosc, 0), title="Normalised T3 Short", message="Normalised T3 Short {{exchange}}:{{ticker}}")
+
+// === User Switches for Long/Short/Both Entry/Exit Signals ===
+entry_mode = input.string("兩者", title="進出場策略方向", options=["多單", "空單", "兩者"], group="策略開關")
+
+show_long = entry_mode == "多單" or entry_mode == "兩者"
+show_short = entry_mode == "空單" or entry_mode == "兩者"
+
+// === Entry/Exit Strategy Logic (with label) ===
+label_offset = 0.2  // 增加標籤位置偏移量
+
+// 定義變量來追踪場內部位與分段出場狀態
+var bool in_long_position = false
+var bool in_short_position = false
+var bool long_exit1_done = false
+var bool long_exit2_done = false
+var bool long_exit3_done = false
+var bool short_exit1_done = false
+var bool short_exit2_done = false
+var bool short_exit3_done = false
+
+// === 進出場策略（加入更多限制條件避免重複信號） ===
+// Buy (Long Entry): 增加更嚴格的條件
+long_entry = not in_long_position and plotosc[1] < -0.25 and plotosc > plotosc[1] and plotosc > sig_ma and plotosc < 0 and ta.crossover(plotosc, sig_ma)  // 多頭進場條件
+
+// Sell (Short Entry): 增加更嚴格的條件
+short_entry = not in_short_position and plotosc[1] > 0.25 and plotosc < plotosc[1] and plotosc < sig_ma and plotosc > 0 and ta.crossunder(plotosc, sig_ma)  // 空頭進場條件
+
+// 更新倉位狀態和顯示標籤
+if show_long and long_entry
+    in_long_position := true
+    in_short_position := false
+    // 進場時重置分段出場旗標
+    long_exit1_done := false
+    long_exit2_done := false
+    long_exit3_done := false
+    label.new(bar_index, plotosc - label_offset, text="Buy", color=color.new(color.green, 80), style=label.style_label_up, textcolor=color.white, size=size.small)
+
+if show_short and short_entry
+    in_short_position := true
+    in_long_position := false
+    // 進場時重置分段出場旗標
+    short_exit1_done := false
+    short_exit2_done := false
+    short_exit3_done := false
+    label.new(bar_index, plotosc + label_offset, text="Sell", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white, size=size.large)
+
+// 出場信號（同時重置倉位狀態）
+// === 三段式出場機制（依序觸發，分段獲利） ===
+// 第一段：動能初轉變（顏色變化）
+long_exit1 = in_long_position and not long_exit1_done and plotosc >= 0.4  // 柱狀圖顏色4時出場
+long_exit2 = in_long_position and long_exit1_done and not long_exit2_done and math.abs(plotosc - 0.5) < 0.01 and math.abs(sig_ma - 0.5) < 0.01  // exit1後且柱狀≈0.5且MA≈0.5首次觸發exit2
+long_exit3 = in_long_position and long_exit1_done and long_exit2_done and not long_exit3_done and ta.crossunder(plotosc, sig_ma)   // exit2後才允許exit3
+
+if show_long and long_exit1
+    long_exit1_done := true
+    label.new(bar_index, plotosc - label_offset, text="Exit1 50%", color=color.new(color.yellow, 0), style=label.style_label_down, textcolor=color.black, size=size.small)
+if show_long and long_exit2
+    long_exit2_done := true
+    label.new(bar_index, plotosc - label_offset, text="Exit2 25%", color=color.new(color.orange, 0), style=label.style_label_down, textcolor=color.black, size=size.small)
+if show_long and long_exit3
+    long_exit3_done := true
+    in_long_position := false
+    label.new(bar_index, plotosc - label_offset, text="Exit3 25%", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white, size=size.small)
+
+// 空單三段式出��（依序觸發）
+short_exit1 = in_short_position and not short_exit1_done and plotosc <= -0.4  // 柱狀圖顏色4時出場（空單相反）
+short_exit2 = in_short_position and short_exit1_done and not short_exit2_done and math.abs(plotosc + 0.5) < 0.01 and math.abs(sig_ma + 0.5) < 0.01  // exit1後且柱狀≈-0.5且MA≈-0.5首次觸發exit2
+short_exit3 = in_short_position and short_exit1_done and short_exit2_done and not short_exit3_done and ta.crossover(plotosc, sig_ma)    // exit2後才允許exit3
+
+if show_short and short_exit1
+    short_exit1_done := true
+    label.new(bar_index, plotosc + label_offset, text="Exit1 50%", color=color.new(color.yellow, 0), style=label.style_label_up, textcolor=color.black, size=size.small)
+if show_short and short_exit2
+    short_exit2_done := true
+    label.new(bar_index, plotosc + label_offset, text="Exit2 25%", color=color.new(color.orange, 0), style=label.style_label_up, textcolor=color.black, size=size.small)
+if show_short and short_exit3
+    short_exit3_done := true
+    in_short_position := false
+    label.new(bar_index, plotosc + label_offset, text="Exit3 25%", color=color.new(color.red, 0), style=label.style_label_up, textcolor=color.white, size=size.small)
